@@ -1,0 +1,17 @@
+For future user
+##################################################################################
+
+video_processor.py is the video-processing script. For each pedestrian it
+records a trajectory (center + bounding box), a full COCO-17 skeleton, and an
+mp4; it pre-sorts clips into enter/pass/exit/removed and writes per-clip and
+per-session metadata. By default the dataset is written to ../data/.
+
+It does NOT compute the handcrafted features -- that stays a separate step.
+
+To run:
+  Set the options in main() at the bottom of video_processor.py, then run it
+  (press Run in your editor, or `python video_processor.py`). No command-line
+  arguments are needed. Set save_clips=False in main() to track/show without
+  saving (monitor mode).
+
+See README.md here for the schema and the settings.

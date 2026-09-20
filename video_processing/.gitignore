@@ -1,0 +1,24 @@
+# Collected dataset — personal recordings (video + JSON), never committed.
+# The placeholder README in data/ is kept.
+data/*
+!data/README.md
+
+# Backup files
+bak/*
+
+# Recorded video anywhere in this folder
+*.mp4
+
+# Auto-downloaded model weights / exports
+*.pt
+*.onnx
+*.engine
+*.task
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

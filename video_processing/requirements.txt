@@ -1,0 +1,24 @@
+# =============================================================================
+# requirements.txt — data_collection_v2 (Linux CPU)
+# Pose-based pedestrian intent — video collection, labeling, and cleaning.
+#
+# Create a normal virtual environment, then install this file:
+#
+#     python3 -m venv .venv
+#     source .venv/bin/activate
+#     pip install -r requirements.txt
+#
+# For CPU-only Linux, install the CPU PyTorch wheels before this file if needed:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# =============================================================================
+
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.1.0          # YOLO pose model + BoT-SORT tracking
+numpy>=1.24.0,<2
+opencv-python>=4.8.0,<4.10 # opencv-python-headless is also suitable for headless-only runs
+
+# Download yolo11n-pose.pt separately and place it in this directory. Model weights
+# are ignored by git and are intentionally not included in the repository.
+
+
