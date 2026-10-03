@@ -2,6 +2,7 @@
 # The placeholder README in data/ is kept.
 data/*
 !data/README.md
+source/*.png
 
 # Backup files
 bak/*
@@ -17,7 +18,6 @@ bak/*
 
 # Python
 .venv/
-venv/
 __pycache__/
 *.pyc
 
