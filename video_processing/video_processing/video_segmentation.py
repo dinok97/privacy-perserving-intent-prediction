@@ -14,12 +14,12 @@ import fiftyone as fo
 import fiftyone.zoo as foz
 
 # Datasets that are already segmented: only opened, annotated and exported
-EXISTING_DATASETS = []#"scene_seg", "scene_seg1"
+EXISTING_DATASETS = [] # <- everything filled here will be able to be changed (hand annotation) e.g. "20250916_095917_id7_enter", "20250916_095917_id93_enter"
 
 # Videos still to segment: each becomes a dataset named scene_<video name>
-VIDEOS = ["20251002_121145_id121_enter.mp4"]  # e.g. ["20250916_095917_id7_enter.mp4"]
+VIDEOS = []  # e.g. ["20250916_095917_id7_enter.mp4"]
 
-PROMPTS = ["floor", "wall", "door", "window"]
+PROMPTS = ["floor", "wall", "door", "window"] # <- ADD OR REMOVE ITEMS TO SEGMENT (each item is another pass through the image)
 THRESHOLD = 0.7  # minimum confidence for a SAM 3 object to be kept
 
 
@@ -76,6 +76,7 @@ def export_scene(dataset, out):
 
     objects = []
     for field in sample.field_names:
+
         value = sample[field]
 
         if isinstance(value, fo.Detections):
