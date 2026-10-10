@@ -1,0 +1,57 @@
+{
+  "image_size": [
+    1280,
+    720
+  ],
+  "distorted": true,
+  "model": "opencv_fisheye",
+  "n_chains": 29,
+  "K": [
+    [
+      450.984,
+      0.0,
+      639.5
+    ],
+    [
+      0.0,
+      450.984,
+      359.5
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "D": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "corner_distortion": 1.0,
+  "edges_straighter": 0.861,
+  "edges_more_bent": 0.0,
+  "edges_straight_after": 0.345,
+  "reason": "edges become straight under a fisheye lens",
+  "image": "motion_20260605_131200_4s_background.png",
+  "new_K": [
+    [
+      351.345,
+      0.0,
+      631.218
+    ],
+    [
+      0.0,
+      351.345,
+      358.702
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "balance": 0.0,
+  "undistorted_image": "motion_20260605_131200_4s_background_undistorted.png"
+}

@@ -1,0 +1,38 @@
+{
+  "image_size": [
+    640,
+    480
+  ],
+  "distorted": false,
+  "model": "opencv_fisheye",
+  "n_chains": 43,
+  "K": [
+    [
+      1450.967,
+      0.0,
+      319.5
+    ],
+    [
+      0.0,
+      1450.967,
+      239.5
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "D": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "corner_distortion": 0.025,
+  "edges_straighter": 0.0,
+  "edges_more_bent": 0.0,
+  "edges_straight_after": 0.84,
+  "reason": "distortion too small to matter",
+  "image": "20251002_121145_id121_enter_background.png"
+}
