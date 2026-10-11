@@ -3,12 +3,15 @@
 data/*
 !data/README.md
 source/*.png
+source/*.jpg
+source/*.jpeg
 
 # Backup files
 bak/*
 
 # Recorded video anywhere in this folder
 *.mp4
+*.avi
 
 # Auto-downloaded model weights / exports
 *.pt
