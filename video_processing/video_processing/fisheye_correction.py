@@ -1,13 +1,20 @@
-"""Detect fisheye / wide-angle distortion in a background image and undo it.
+"""Detect fisheye / wide-angle distortion in a video and undistort the video.
 
-Flow: <video>_background.png -> long edge chains -> the focal length that
-makes those chains straightest (straight lines in a room must be straight in
-a distortion-free image) -> if that bends the image noticeably:
-<video>_background_undistorted.png, plus <video>_background_lens.json with
-the camera matrix K and coefficients D for OpenCV's cv2.fisheye functions.
+Flow: <video> -> median background (background_extraction.py, kept in
+memory) -> long edge chains -> the focal length that makes those chains
+straightest (straight lines in a room must be straight in a distortion-free
+image) -> if that bends the image noticeably: every frame is undistorted
+into <video>_undistorted.mp4. <video>_lens.json records the decision and the
+lens: K and D for OpenCV's cv2.fisheye functions, and new_K, the camera
+matrix of the undistorted video (needed for depth / 3D mapping).
+Everything is saved next to the video.
+
+The lens is detected on the median background rather than on single frames:
+people are removed there, so the only edges left belong to the room. The
+camera does not move during a video, so one lens estimate fits every frame.
 
 No checkerboard is needed, but the scene has to contain straight edges
-(walls, door frames, floor lines), which a background image of a room does.
+(walls, door frames, floor lines), which a room does.
 """
 
 from pathlib import Path
@@ -17,15 +24,18 @@ import sys
 import cv2
 import numpy as np
 
-# Background images to check, e.g. ["20250916_095917_id7_enter_background.png"]
+from background_extraction import median_background
+
+# Videos to check, e.g. ["20250916_095917_id7_enter.mp4"]
 # (paths given on the command line are used instead when present)
-IMAGES = ["../source/20251002_121145_id121_enter_background.png", "../source/motion_20260605_131200_4s_background.png"]
+VIDEOS = []
 
 MIN_DISTORTION = 0.03  # corner pixels must sit >= 3 % too close to the centre
 MIN_GAIN = 0.15        # share of the edge length that must get straighter
 MIN_STRAIGHT = 0.3     # share of the edge length that must end up straight
 MIN_CHAINS = 8         # fewer usable edge chains than this -> no decision
 BALANCE = 0.0          # 0 = crop to valid pixels ... 1 = keep every source pixel
+CODEC = "mp4v"         # fourcc of the undistorted video
 
 # Edge detection, in pixels of an image resized to WORK_SIZE
 WORK_SIZE = 1280       # longer image side
@@ -213,76 +223,95 @@ def detect_distortion(image):
     return lens
 
 
-def undistort_image(image, lens, balance=BALANCE):
-    """Undistorts an image with the lens found by detect_distortion.
+def undistort_maps(lens, balance=BALANCE):
+    """Pixel maps that undistort a frame; computed once, used for every frame.
 
-    Adds new_K to the lens: the camera matrix of the undistorted image.
+    Adds new_K to the lens: the camera matrix of the undistorted frames.
     """
     size = tuple(lens["image_size"])
     K, D = np.array(lens["K"]), np.array(lens["D"])
     new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
         K, D, size, np.eye(3), balance=balance)
-    map1, map2 = cv2.fisheye.initUndistortRectifyMap(
-        K, D, np.eye(3), new_K, size, cv2.CV_16SC2)
     lens["new_K"] = new_K.round(3).tolist()
     lens["balance"] = balance
+    return cv2.fisheye.initUndistortRectifyMap(
+        K, D, np.eye(3), new_K, size, cv2.CV_16SC2)
+
+
+def undistort_image(image, lens, balance=BALANCE):
+    """Undistorts a single image with the lens found by detect_distortion."""
+    map1, map2 = undistort_maps(lens, balance)
     return cv2.remap(image, map1, map2, interpolation=cv2.INTER_LINEAR)
 
 
-def undistort_points(points, lens):
-    """Moves pixel points (e.g. a trajectory) into the undistorted image.
+def undistort_video(video_path, out_path, lens, balance=BALANCE):
+    """Writes an undistorted copy of a video, frame by frame.
 
-    Needed so that positions from the original video line up with a scene
-    that was segmented on the undistorted background.
+    Same size and frame rate as the input. Returns the number of frames.
     """
-    if not lens.get("distorted"):
-        return np.asarray(points, dtype=np.float64)
-    pts = np.asarray(points, dtype=np.float64).reshape(-1, 1, 2)
-    out = cv2.fisheye.undistortPoints(
-        pts, np.array(lens["K"]), np.array(lens["D"]), P=np.array(lens["new_K"]))
-    return out.reshape(-1, 2)
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        cap.release()
+        raise RuntimeError(f"{video_path} reports no frame rate")
+
+    map1, map2 = undistort_maps(lens, balance)
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*CODEC),
+                             fps, tuple(lens["image_size"]))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Could not open {out_path} for writing")
+
+    n = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        writer.write(cv2.remap(frame, map1, map2, interpolation=cv2.INTER_LINEAR))
+        n += 1
+    cap.release()
+    writer.release()
+    return n
 
 
-def correct_background(image_path, balance=BALANCE):
-    """Checks a background image and undistorts it when it is distorted.
+def correct_video(video_path, balance=BALANCE):
+    """Checks a video for fisheye distortion and undistorts it when needed.
 
-    Returns the path of the image to use from here on: the undistorted copy,
-    or the original when no distortion was found. The lens JSON is written
-    in both cases, so the decision is recorded next to the image.
+    Returns the path of the video to use from here on: <video>_undistorted.mp4,
+    or the original when no distortion was found. <video>_lens.json is
+    written in both cases, so the decision is recorded next to the video.
     """
-    image_path = Path(image_path)
-    image = cv2.imread(str(image_path))
-    if image is None:
-        raise RuntimeError(f"Could not read image {image_path}")
-
-    lens = detect_distortion(image)
-    lens["image"] = image_path.name
-    result = image_path
+    video_path = Path(video_path)
+    lens = detect_distortion(median_background(video_path))
+    lens["video"] = video_path.name
+    result = video_path
 
     if lens["distorted"]:
-        result = image_path.with_name(f"{image_path.stem}_undistorted.png")
-        cv2.imwrite(str(result), undistort_image(image, lens, balance))
-        lens["undistorted_image"] = result.name
+        result = video_path.with_name(f"{video_path.stem}_undistorted.mp4")
+        lens["n_frames"] = undistort_video(video_path, result, lens, balance)
+        lens["undistorted_video"] = result.name
 
-    with open(image_path.with_name(f"{image_path.stem}_lens.json"), "w") as f:
+    with open(video_path.with_name(f"{video_path.stem}_lens.json"), "w") as f:
         json.dump(lens, f, indent=2)
     return str(result)
 
 
 def main():
-    images = sys.argv[1:] or IMAGES
-    if not images:
-        raise SystemExit("Nothing to do: fill in IMAGES or pass image paths")
+    videos = sys.argv[1:] or VIDEOS
+    if not videos:
+        raise SystemExit("Nothing to do: fill in VIDEOS or pass video paths")
 
-    for image in images:
-        result = correct_background(image)
-        with open(Path(image).with_name(f"{Path(image).stem}_lens.json")) as f:
+    for video in videos:
+        result = correct_video(video)
+        with open(Path(video).with_name(f"{Path(video).stem}_lens.json")) as f:
             lens = json.load(f)
         verdict = "DISTORTED" if lens["distorted"] else "not distorted"
-        print(f"{image}: {verdict} ({lens['reason']}, {lens['n_chains']} edge chains)")
+        print(f"{video}: {verdict} ({lens['reason']}, {lens['n_chains']} edge chains)")
         if lens["distorted"]:
             print(f"  focal length {lens['K'][0][0]:.0f} px, corner distortion "
                   f"{100 * lens['corner_distortion']:.0f} %, saved {result}")
+        else:
+            print(f"  use the original video: {result}")
 
 
 if __name__ == "__main__":
