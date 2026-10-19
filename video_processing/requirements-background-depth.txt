@@ -1,0 +1,6 @@
+# Local depth aggregation and 3D visualisation; no model inference dependencies.
+numpy>=1.23,<2
+matplotlib>=3.7
+Pillow>=10
+plotly>=5.18
+trimesh>=4
