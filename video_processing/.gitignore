@@ -5,6 +5,8 @@ data/*
 source/*.png
 source/*.jpg
 source/*.jpeg
+source/*.json
+source/**/*.json
 
 # Backup files
 bak/*

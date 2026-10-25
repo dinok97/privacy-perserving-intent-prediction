@@ -14,6 +14,7 @@ Flow:
 from pathlib import Path
 import json
 import time
+import sys
 
 import cv2
 import numpy as np
@@ -22,7 +23,10 @@ from PIL import Image
 from transformers import Sam3Model, Sam3Processor
 
 
-SEGMENTATION_DEST_DIR = "../data/segmentation_results"
+IMAGES = []
+SEGMENTATION_DEST_DIR = (
+    Path(__file__).resolve().parent / ".." / "data" / "segmentation_results"
+).resolve()
 
 # Confidence threshold for accepting a detected concept or object
 # Adjust this value to control the number of detected objects.
@@ -128,7 +132,7 @@ def save_overlay(image_path, objects, out, alpha=0.45):
     cv2.imwrite(str(out), overlay)
 
 
-def segment_one_image(image_path, model, processor):
+def segment_image(image_path, model, processor):
     """
     Segment one image using multiple prompts.
 
@@ -206,12 +210,9 @@ def segment_one_image(image_path, model, processor):
 
 def segment_images(
     images: list[str],
-    dest_dir: str = SEGMENTATION_DEST_DIR,
+    dest_dir: str = "",
 ):
     """Segment images and export JSON and overlays without FiftyOne."""
-    dest_path = Path(dest_dir)
-    dest_path.mkdir(parents=True, exist_ok=True)
-
     # Load the model only once.
     model, processor = load_model()
 
@@ -225,23 +226,23 @@ def segment_images(
             continue
 
         start = time.perf_counter()
-        print(f"\nSegmenting {image_path}...")
+        print(f"Segmenting {image_path.name}...")
 
-        scene = segment_one_image(
-            image_path, model, processor
-        )
+        scene = segment_image(image_path, model, processor)
 
-        json_path = dest_path / f"{image_path.stem}.json"
-        overlay_path = (
-            dest_path / f"{image_path.stem}_overlay.png"
-        )
+        json_path = Path(image_path).with_name(f"{Path(image_path).stem}.json")
+        overlay_path = Path(image_path).with_name(f"{Path(image_path).stem}_overlay.png")
+            
+        if dest_dir:    
+            dest_path = Path(dest_dir)
+            dest_path.mkdir(parents=True, exist_ok=True)
+            json_path = dest_path / f"{image_path.stem}.json"
+            overlay_path = (dest_path / f"{image_path.stem}_overlay.png")
 
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(scene, f, indent=2)
 
-        save_overlay(
-            image_path, scene["objects"], overlay_path
-        )
+        save_overlay(image_path, scene["objects"], overlay_path)
 
         elapsed = time.perf_counter() - start
 
@@ -257,10 +258,14 @@ def segment_images(
     )
 
 
-if __name__ == "__main__":
-    images = [
-        "../source/motion_20260605_131200_4s_background.png",
-        "../source/motion_20260605_131200_4s_background_undistorted.png"
-    ]
-
+def main():
+    images = sys.argv[1:] or IMAGES
+    
+    if not images:
+        raise SystemExit("Nothing to do: fill in IMAGES or pass image paths")
+    
     segment_images(images)
+
+
+if __name__ == "__main__":
+    main()

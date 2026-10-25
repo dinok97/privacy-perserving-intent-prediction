@@ -8,6 +8,9 @@ into <video>_undistorted.mp4. <video>_lens.json records the decision and the
 lens: K and D for OpenCV's cv2.fisheye functions, and new_K, the camera
 matrix of the undistorted video (needed for depth / 3D mapping).
 Everything is saved next to the video.
+Source videos are copied into a sibling [TEMP]_undistorted_results folder and
+processed there. Corrected inputs are removed after a usable output is made,
+leaving only the undistorted video in that folder.
 
 The lens is detected on the median background rather than on single frames:
 people are removed there, so the only edges left belong to the room. The
@@ -19,6 +22,7 @@ No checkerboard is needed, but the scene has to contain straight edges
 
 from pathlib import Path
 import json
+import shutil
 import sys
 
 import cv2
@@ -277,41 +281,66 @@ def undistort_video(video_path, out_path, lens, balance=BALANCE):
 def correct_video(video_path, balance=BALANCE):
     """Checks a video for fisheye distortion and undistorts it when needed.
 
-    Returns the path of the video to use from here on: <video>_undistorted.mp4,
-    or the original when no distortion was found. <video>_lens.json is
-    written in both cases, so the decision is recorded next to the video.
+    Copies the input into [TEMP]_undistorted_results and returns the usable video
+    path there. The lens JSON is written into the same folder.
     """
     video_path = Path(video_path)
-    lens = detect_distortion(median_background(video_path))
+    result_dir = video_path.parent / "[TEMP]_undistorted_results"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    staged_video = result_dir / video_path.name
+    if video_path.resolve() != staged_video.resolve():
+        shutil.copy2(video_path, staged_video)
+
+    lens = detect_distortion(median_background(staged_video))
     lens["video"] = video_path.name
-    result = video_path
+    result = staged_video
 
     if lens["distorted"]:
-        result = video_path.with_name(f"{video_path.stem}_undistorted.mp4")
-        lens["n_frames"] = undistort_video(video_path, result, lens, balance)
+        result = staged_video.with_name(f"{video_path.stem}_undistorted.mp4")
+        temp_result = result.with_name(f".{result.stem}.tmp{result.suffix}")
+        try:
+            lens["n_frames"] = undistort_video(
+                staged_video, temp_result, lens, balance)
+            if lens["n_frames"] == 0 or not temp_result.is_file() or temp_result.stat().st_size == 0:
+                raise RuntimeError(f"Undistortion produced no usable video for {video_path}")
+            temp_result.replace(result)
+        except Exception:
+            temp_result.unlink(missing_ok=True)
+            raise
         lens["undistorted_video"] = result.name
+        if staged_video.resolve() != result.resolve():
+            staged_video.unlink()
 
-    with open(video_path.with_name(f"{video_path.stem}_lens.json"), "w") as f:
+    lens_path = result_dir / f"{video_path.stem}_lens.json"
+    with open(lens_path, "w") as f:
         json.dump(lens, f, indent=2)
     return str(result)
+
+
+def correct_videos(videos: list[str]):
+    if not videos:
+        raise SystemExit("Nothing to do: fill in VIDEOS or pass video paths")
+
+    for video in videos:
+        result = correct_video(video)
+        lens_path = Path(result).parent / f"{Path(video).stem}_lens.json"
+        with open(lens_path) as f:
+            lens = json.load(f)
+        verdict = "DISTORTED" if lens["distorted"] else "not distorted"
+        print(f"[UNDISTORT] {Path(video).name}: {verdict} ({lens['reason']}, {lens['n_chains']} edge chains)")
+        if lens["distorted"]:
+            print(f"  focal length {lens['K'][0][0]:.0f} px, corner distortion "
+                  f"{100 * lens['corner_distortion']:.0f} %, saved {result}")
+        else:
+            print(f"  use the staged video: {result}")
 
 
 def main():
     videos = sys.argv[1:] or VIDEOS
     if not videos:
         raise SystemExit("Nothing to do: fill in VIDEOS or pass video paths")
-
-    for video in videos:
-        result = correct_video(video)
-        with open(Path(video).with_name(f"{Path(video).stem}_lens.json")) as f:
-            lens = json.load(f)
-        verdict = "DISTORTED" if lens["distorted"] else "not distorted"
-        print(f"{video}: {verdict} ({lens['reason']}, {lens['n_chains']} edge chains)")
-        if lens["distorted"]:
-            print(f"  focal length {lens['K'][0][0]:.0f} px, corner distortion "
-                  f"{100 * lens['corner_distortion']:.0f} %, saved {result}")
-        else:
-            print(f"  use the original video: {result}")
+    
+    correct_videos(videos)
 
 
 if __name__ == "__main__":

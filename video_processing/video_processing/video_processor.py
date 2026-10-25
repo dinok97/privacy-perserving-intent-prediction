@@ -462,6 +462,7 @@ class LivePoseCollector:
         self.current_source_stem = "source"
         self.source_clip_counts: dict[str, int] = {}
         self.seq = 0                        # clip counter for the whole session
+        self.processed_video_paths: list[str] = []
         self.counts = {"enter": 0, "pass": 0, "exit": 0, "removed": 0}
         self.reason_counts: dict[str, int] = {}
 
@@ -657,7 +658,9 @@ class LivePoseCollector:
                 with (dst / f"{base}_pose.json").open("w", encoding="utf-8") as f:
                     json.dump(sidecar, f)
             if rec["temp_path"] is not None and rec["temp_path"].exists():
-                os.replace(rec["temp_path"], dst / f"{base}.mp4")
+                saved_video_path = dst / f"{base}.mp4"
+                os.replace(rec["temp_path"], saved_video_path)
+                self.processed_video_paths.append(str(saved_video_path.resolve()))
 
         # Tally + one-line console update (printed only if print_labels).
         bucket = "removed" if result == "removed" else label
@@ -942,6 +945,7 @@ class LivePoseCollector:
             pass
         if self.cfg.save_clips:
             self._write_session_metadata()
+            self._write_processed_video_paths()
         print(f"[DONE] session {self.sess_str}: {self.counts}  reasons={self.reason_counts}")
 
     def _write_session_metadata(self):
@@ -967,6 +971,12 @@ class LivePoseCollector:
         with path.open("w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         print(f"[DONE] session metadata: {path}")
+    
+    def _write_processed_video_paths(self):
+        path = Path(self.cfg.source_dir).parent / f"processed_video_paths.json"
+        print(path)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(self.processed_video_paths, f, indent=2)
 
 
 def _config_to_jsonable(cfg: CollectorConfig) -> dict:
@@ -978,11 +988,16 @@ def _config_to_jsonable(cfg: CollectorConfig) -> dict:
 # ---------------------------------------------------------------------------
 # Run the collector
 # ---------------------------------------------------------------------------
-def main() -> int:
+def run() -> int:
     # ----------------------------------------------------------------------- #
     # Settings -- edit these, then just run the script (Run in your editor, or #
     # `python video_processor.py`). No command-line arguments are needed. #
     # ----------------------------------------------------------------------- #
+    source_dir = Path(__file__).resolve().parents[1] / "source"
+    undistorted_source_dir = source_dir / "[TEMP]_undistorted_results"
+    if undistorted_source_dir.is_dir():
+        source_dir = undistorted_source_dir
+
     cfg = CollectorConfig(
         # --- perception / speed knobs ---
         model=str(Path(__file__).resolve().parents[1] / "yolo11n-pose.pt"),
@@ -990,7 +1005,7 @@ def main() -> int:
         tracker="bytetrack.yaml",   # lighter than botsort.yaml for CPU processing
         imgsz=640,                   # lower (e.g. 480) trades accuracy for CPU speed
         # --- video source / geometry ---
-        source_dir=str(Path(__file__).resolve().parents[1] / "source"),
+        source_dir=str(source_dir),
         source_video=None,           # set a path to override source_dir selection
         ellipse_axes=(480, 130),     # door entrance region (half-ellipse)
         distort=False,               # new video source: no Jetson calibration by default
@@ -1011,6 +1026,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())
 
 

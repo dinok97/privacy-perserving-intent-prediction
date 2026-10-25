@@ -20,6 +20,7 @@ opencv-python>=4.8.0,<4.10 # opencv-python-headless is also suitable for headles
 transformers>=5.0.0        # SAM 3 model and processor
 pillow>=10.0.0             # image loading for SAM 3
 fiftyone>=1.0.0            # interactive scene annotation workflow
+scikit-image               # image processing utilities
 
 # Download yolo11n-pose.pt separately and place it in this directory. Model weights
 # are ignored by git and are intentionally not included in the repository.
