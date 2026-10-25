@@ -47,7 +47,7 @@ def run_trajectory_tracker():
     video_processor.run()
 
     
-def run_background_extractor_segmentation():
+def run_background_extractor_and_segmentation():
     background_paths = []
     processed_video_path = Path(f"{SOURCE_DIR}/processed_video_paths.json")
     with open(processed_video_path) as f:
@@ -76,7 +76,7 @@ def run_feature_extractor():
 def run_pipeline():
     run_fisheye_corrector()
     run_trajectory_tracker()
-    run_background_extractor_segmentation()
+    run_background_extractor_and_segmentation()
     run_feature_extractor()
     
 
