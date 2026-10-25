@@ -23,8 +23,11 @@ REPO = HERE.parent
 
 
 def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def source_info(manifest: dict) -> dict:
@@ -161,7 +164,7 @@ def process_run(manifest_path: Path, output_root: Path, args) -> dict:
 
     summary = {
         'video': source['name'], 'source_video_sha256': source.get('sha256'),
-        'source_run': manifest_path.parent.relative_to(REPO).as_posix(),
+        'source_run': manifest_path.parent.resolve().as_posix(),
         'source_manifest_sha256': sha256(manifest_path),
         'frames_used': count, 'prediction_width': median.shape[1],
         'prediction_height': median.shape[0], 'depth_dtype': str(median.dtype),

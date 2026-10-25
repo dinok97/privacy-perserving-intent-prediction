@@ -45,6 +45,7 @@ to avoid overwriting the first clip.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -59,6 +60,14 @@ from typing import Any, Optional
 # can be imported (e.g. to reuse the JSON helpers) without those heavy packages.
 
 SCHEMA_VERSION = "2.0"
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # COCO-17 keypoint order produced by Ultralytics YOLO pose models.
 COCO_KEYPOINT_NAMES = [
@@ -119,6 +128,7 @@ class CollectorConfig:
     camera_index: int = 0
     source_dir: str = "source"       # video files are read from this directory
     source_video: Optional[str] = None  # optional specific video; otherwise first file in source_dir
+    processed_manifest: Optional[str] = None  # explicit manifest path for pipeline orchestration
     distort: bool = False            # False -> no calibration; True -> use CAMERA_MTX/CAMERA_DIST
     ellipse_axes: tuple[int, int] = (480, 130)   # door entrance region
 
@@ -628,6 +638,9 @@ class LivePoseCollector:
                 "exit_edge": exit_edge,
                 "model": cfg.model,
                 "source_video": rec["source_stem"],
+                "clip_video_sha256": (file_sha256(rec["temp_path"])
+                                      if rec['temp_path'] and rec['temp_path'].is_file() else None),
+                "time_basis": "source_video_frames",
                 "tracker": cfg.tracker,
                 "conf_threshold": cfg.conf,
                 "imgsz": cfg.imgsz,
@@ -841,6 +854,7 @@ class LivePoseCollector:
                             apply_undistort=self.cfg.distort,
                             for_writing=self.cfg.save_clips)
         try:
+            source_frame_index = 0
             while True:
                 t0 = time.perf_counter()
                 ret, frame = self.cap.read()
@@ -850,7 +864,11 @@ class LivePoseCollector:
                     return True
                 clean = self._undistort(frame)
                 t_und = time.perf_counter()
-                dets = self._process_frame(clean, t_now)
+                # Offline features follow video time, not machine/inference throughput.
+                source_fps = reported if reported > 0 else self.record_fps
+                source_time = source_frame_index / source_fps
+                source_frame_index += 1
+                dets = self._process_frame(clean, source_time)
                 t_proc = time.perf_counter()
 
                 if self.cfg.debug:
@@ -973,7 +991,9 @@ class LivePoseCollector:
         print(f"[DONE] session metadata: {path}")
     
     def _write_processed_video_paths(self):
-        path = Path(self.cfg.source_dir).parent / f"processed_video_paths.json"
+        path = (Path(self.cfg.processed_manifest) if self.cfg.processed_manifest else
+                Path(self.cfg.source_dir).parent / "processed_video_paths.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
         print(path)
         with path.open("w", encoding="utf-8") as f:
             json.dump(self.processed_video_paths, f, indent=2)
@@ -988,24 +1008,26 @@ def _config_to_jsonable(cfg: CollectorConfig) -> dict:
 # ---------------------------------------------------------------------------
 # Run the collector
 # ---------------------------------------------------------------------------
-def run() -> int:
+def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu") -> list[str]:
     # ----------------------------------------------------------------------- #
     # Settings -- edit these, then just run the script (Run in your editor, or #
     # `python video_processor.py`). No command-line arguments are needed. #
     # ----------------------------------------------------------------------- #
-    source_dir = Path(__file__).resolve().parents[1] / "source"
-    undistorted_source_dir = source_dir / "[TEMP]_undistorted_results"
-    if undistorted_source_dir.is_dir():
-        source_dir = undistorted_source_dir
+    if source_dir is None:
+        source_dir = Path(__file__).resolve().parents[1] / "source"
+        undistorted_source_dir = source_dir / "[TEMP]_undistorted_results"
+        if undistorted_source_dir.is_dir():
+            source_dir = undistorted_source_dir
 
     cfg = CollectorConfig(
         # --- perception / speed knobs ---
         model=str(Path(__file__).resolve().parents[1] / "yolo11n-pose.pt"),
-        device="cpu",
+        device=device,
         tracker="bytetrack.yaml",   # lighter than botsort.yaml for CPU processing
         imgsz=640,                   # lower (e.g. 480) trades accuracy for CPU speed
         # --- video source / geometry ---
         source_dir=str(source_dir),
+        processed_manifest=str(processed_manifest) if processed_manifest else None,
         source_video=None,           # set a path to override source_dir selection
         ellipse_axes=(480, 130),     # door entrance region (half-ellipse)
         distort=False,               # new video source: no Jetson calibration by default
@@ -1019,13 +1041,14 @@ def run() -> int:
     )
 
     # The dataset is written next to this script, in ../data.
-    cfg.output_root = str(Path(__file__).resolve().parents[1] / "data")
+    cfg.output_root = str(output_root or Path(__file__).resolve().parents[1] / "data")
 
-    LivePoseCollector(cfg).run(display=not cfg.headless)
-    return 0
+    collector = LivePoseCollector(cfg)
+    collector.run(display=not cfg.headless)
+    return collector.processed_video_paths
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    run()
 
 

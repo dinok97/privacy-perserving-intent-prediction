@@ -29,8 +29,11 @@ COLOURS = np.array([[140, 148, 158], [75, 166, 235], [235, 183, 59],
 
 
 def digest(path):
+    result = hashlib.sha256()
     with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            result.update(chunk)
+    return result.hexdigest()
 
 
 def polygon_mask(obj, width, height):
@@ -42,9 +45,9 @@ def polygon_mask(obj, width, height):
     return np.asarray(image, dtype=bool)
 
 
-def align_labels(scene, width, height):
+def align_labels(scene, width, height, *, allow_undistorted=False):
     source_width, source_height = scene['image_size']
-    if '_undistorted' in scene['image']:
+    if '_undistorted' in scene['image'] and not allow_undistorted:
         raise ValueError('Undistorted polygons require a lens remapping, not only resizing.')
     original_classes = np.zeros((source_height, source_width), dtype=np.uint8)
     original_instances = np.zeros((source_height, source_width), dtype=np.int32)
@@ -199,9 +202,11 @@ def render_previews(out, stem, rgb, classes, world, stable):
     plt.close(fig)
 
 
-def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, source_scene):
+def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, source_scene,
+                 *, allow_undistorted=False):
     source_width, source_height = source_scene['image_size']
-    original_classes, _, _ = align_labels(source_scene, source_width, source_height)
+    original_classes, _, _ = align_labels(source_scene, source_width, source_height,
+                                         allow_undistorted=allow_undistorted)
     Image.fromarray(COLOURS[original_classes]).save(out / 'original_2d_segmentation.png')
     y, x = np.indices(classes.shape)
     sampling = (x % 2 == 0) & (y % 2 == 0)
@@ -317,8 +322,8 @@ document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener
     return int(keep.sum())
 
 
-def process_scene(path, depth_root, output_root):
-    stem = path.stem.removeprefix('scene_')
+def process_scene(path, depth_root, output_root, *, video_stem=None, allow_undistorted=False):
+    stem = video_stem or path.stem.removeprefix('scene_')
     background_folder = depth_root / stem
     metadata_path = background_folder / 'metadata.json'
     if not metadata_path.is_file():
@@ -335,7 +340,7 @@ def process_scene(path, depth_root, output_root):
     expected_height = round(source_height * (518 / source_width) / 14) * 14
     if (width, height) != (518, min(518, expected_height)) or expected_height > 518:
         raise ValueError('This scene requires preprocessing other than the verified uncropped resize.')
-    classes, instances, aligned = align_labels(scene, width, height)
+    classes, instances, aligned = align_labels(scene, width, height, allow_undistorted=allow_undistorted)
     intrinsics = []
     files = sorted((run / stem).glob('frame_*.npz'))
     for frame in files:
@@ -375,7 +380,8 @@ def process_scene(path, depth_root, output_root):
     cloud_scene.apply_transform(glb_transform)
     cloud_scene.export(out / 'segmented_background.glb')
     render_previews(out, stem, rgb, classes, world, keep)
-    viewer_points = write_viewer(out, stem, world, rgb, classes, instances, keep, depth, scene)
+    viewer_points = write_viewer(out, stem, world, rgb, classes, instances, keep, depth, scene,
+                                  allow_undistorted=allow_undistorted)
 
     # Independently reload both 3D exports and verify all points survived export.
     glb = trimesh.load(out / 'segmented_background.glb', force='scene', process=False)
@@ -391,7 +397,7 @@ def process_scene(path, depth_root, output_root):
                          'exported_3d_points': int((ids == i).sum())}
               for i in range(len(NAMES))}
     result = {
-        'video': stem + '.mp4', 'segmentation_source': path.relative_to(REPO).as_posix(),
+        'video': background_meta['video'], 'segmentation_source': path.resolve().as_posix(),
         'source_video_sha256': background_meta['source_video_sha256'],
         'segmentation_sha256': digest(path), 'background_depth_sha256': digest(background_folder / 'background_depth.npy'),
         'source_image_size': [source_width, source_height], 'matched_image_size': [width, height],
