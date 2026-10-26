@@ -166,9 +166,12 @@ def select_depth_run(runs_root, info):
     root = Path(runs_root)
     manifests = [root] if root.is_file() else sorted(root.rglob('processing_manifest.json'))
     for path in manifests:
-        source = source_info(load(path))
+        manifest = load(path)
+        source = source_info(manifest)
         if source.get('sha256') != info['sha256']:
             continue
+        if manifest.get('extrinsic_convention', 'world_to_camera') != 'world_to_camera':
+            raise ValueError('LingBot exports must use world-to-camera extrinsics')
         if source['frame_count'] != info['frame_count'] or not math.isclose(source['fps'], info['fps'], rel_tol=1e-4):
             raise ValueError('LingBot provenance matches bytes but declares different video timing')
         if source.get('width', info['width']) != info['width'] or source.get('height', info['height']) != info['height']:
@@ -186,26 +189,41 @@ def ensure_depth_run(video, info, runs_root, workspace, command_config=None):
         return found
     if command_config is None:
         raise ValueError(f'No LingBot predictions match the exact clip {video}. '
-                         'Use --lingbot-runs with matching exports or --lingbot-command-config. '
+                         'Use --lingbot-runs with matching exports or --lingbot-config. '
                          'Original-video depth cannot be substituted for a processed/undistorted clip.')
     config_path = Path(command_config).resolve()
     config = load(config_path)
     command = config.get('command')
-    if not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command):
+    if 'runtime' not in config and (not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command)):
         raise ValueError('LingBot command config needs a nonempty command array; shell strings are not accepted')
     run = Path(workspace) / 'lingbot_run'
     run.mkdir(parents=True, exist_ok=True)
     values = {'video': str(Path(video).resolve()), 'output': str(run.resolve()),
               'stem': info['stem'], 'predictions': str((run / info['stem']).resolve())}
     # Replace only our tokens; literal braces in Python/JSON arguments are not templates.
-    argv = list(command)
+    argv = list(command or [])
     for key, value in values.items():
         argv = [arg.replace('{' + key + '}', value) for arg in argv]
     cwd = config.get('cwd')
     if cwd is not None:
         cwd = (config_path.parent / cwd).resolve()
     with (run / 'inference.log').open('w', encoding='utf-8') as log:
-        subprocess.run(argv, cwd=cwd, check=True, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            if 'runtime' in config:
+                import lingbot_runtime
+                lingbot_runtime.run(config, config_path, video, run, log)
+            else:
+                subprocess.run(argv, cwd=cwd, check=True, stdout=log, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as error:
+            marker = run / 'processing_manifest.json'
+            if marker.is_file():
+                marker.replace(run / 'provider_manifest.json')
+            raise RuntimeError(f'LingBot inference failed; see {run / "inference.log"}') from error
+    # A provider completion marker becomes a cache entry only after our checks.
+    manifest = run / 'processing_manifest.json'
+    existing = load(manifest) if manifest.is_file() else {}
+    if manifest.is_file():
+        manifest.replace(run / 'provider_manifest.json')
     predictions = run / info['stem']
     expected = [f'frame_{i:06d}.npz' for i in range(info['frame_count'])]
     if sorted(p.name for p in predictions.glob('frame_*.npz')) != expected:
@@ -222,10 +240,14 @@ def ensure_depth_run(video, info, runs_root, workspace, command_config=None):
                     or not (data['depth'] > 0).all()):
                 raise ValueError(f'Invalid prediction geometry: {name}')
     # The orchestrator records the exact command input, not guessed filenames from another run.
-    manifest = run / 'processing_manifest.json'
-    existing = load(manifest) if manifest.is_file() else {}
-    if existing.get('source', {}).get('sha256', info['sha256']) != info['sha256']:
-        raise ValueError('Provider wrote provenance for a different source video')
+    provider_source = existing.get('source', {})
+    for field in ('sha256', 'width', 'height', 'frame_count'):
+        if field in provider_source and provider_source[field] != info[field]:
+            raise ValueError(f'Provider wrote provenance for a different source video ({field})')
+    if 'fps' in provider_source and not math.isclose(provider_source['fps'], info['fps'], rel_tol=1e-4):
+        raise ValueError('Provider wrote provenance for different video timing')
+    if existing.get('extrinsic_convention', 'world_to_camera') != 'world_to_camera':
+        raise ValueError('LingBot exports must use world-to-camera extrinsics')
     save(manifest, {**existing, 'source': info, 'provider_config_sha256': sha(config_path),
                     'all_source_frames_processed': True})
     return run / 'processing_manifest.json'

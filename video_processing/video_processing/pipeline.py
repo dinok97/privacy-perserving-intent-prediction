@@ -8,9 +8,9 @@ Processed manifests accept Dino's clip-path list or {video, trajectory, scene,
 pose, background} records. Paths are relative to the manifest. This mode reuses
 YOLO detections; no tracking model is loaded. Optional scene paths reuse SAM3.
 
-For missing depth, --lingbot-command-config accepts JSON with a command argv
-array and optional cwd. Arguments support {video}, {output}, {stem} and
-{predictions}; export frame_XXXXXX.npz into {predictions}. No shell is used.
+For missing depth, --lingbot-config accepts a local or ssh-docker runtime JSON
+(see lingbot_runtime.py). LingBot stays in its own checkout/environment. The
+legacy --lingbot-command-config alias also supports custom command argv/cwd.
 """
 from __future__ import annotations
 
@@ -157,7 +157,8 @@ def main():
     parser.add_argument('--processed-manifest', type=Path, help='Reuse saved clips/trajectory JSON; skip fisheye and YOLO stages')
     parser.add_argument('--with-3d', action='store_true', help='Append LingBot distances and closure rates to 2D features')
     parser.add_argument('--lingbot-runs', type=Path, default=PROJECT / 'data/lingbot')
-    parser.add_argument('--lingbot-command-config', type=Path, help='JSON command argv/cwd for missing per-frame LingBot predictions')
+    parser.add_argument('--lingbot-config', '--lingbot-command-config', dest='lingbot_command_config',
+                        type=Path, help='LingBot local/ssh-docker runtime JSON (or custom command argv/cwd)')
     parser.add_argument('--door-width-m', type=float, default=.825)
     parser.add_argument('--skip-undistort', action='store_true')
     parser.add_argument('--device', default='cpu', help='YOLO device for new tracking runs')
