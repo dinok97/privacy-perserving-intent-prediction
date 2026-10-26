@@ -1,6 +1,9 @@
 """Run in the external LingBot environment; export the pipeline's depth contract.
 
 This script imports LingBot from --repo. It neither vendors nor installs it.
+Upstream repository and installation: https://github.com/Robbyant/lingbot-map
+The external environment and lingbot-map-long.pt checkpoint must be set up
+separately; cloning this project alone does not install them.
 Every encoded video frame is processed, in order, without temporal sampling.
 """
 from __future__ import annotations
@@ -101,7 +104,8 @@ def infer(args):
     import torch
     repo, checkpoint, video, output = (Path(p).resolve() for p in (args.repo, args.checkpoint, args.video, args.output))
     if not (repo / 'lingbot_map/models/gct_stream.py').is_file():
-        raise FileNotFoundError(f'Not a compatible LingBot checkout: {repo}')
+        raise FileNotFoundError(f'Not a compatible LingBot checkout: {repo}. '
+                                'Clone/install https://github.com/Robbyant/lingbot-map separately.')
     if not checkpoint.is_file():
         raise FileNotFoundError(f'LingBot checkpoint missing: {checkpoint}')
     device = torch.device(args.device)

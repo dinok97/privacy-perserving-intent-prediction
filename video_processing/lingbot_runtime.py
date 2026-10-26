@@ -1,5 +1,11 @@
 """Invoke the LingBot adapter in a separate local environment or SSH Docker job.
 
+Upstream: https://github.com/Robbyant/lingbot-map
+Clone/install that project in its own Python environment using its upstream
+instructions, and download its lingbot-map-long.pt checkpoint separately.
+Our repository contains the adapter, not LingBot or its weights. Start with
+lingbot.local.example.json and replace its three absolute-path placeholders.
+
 --lingbot-config JSON examples (paths are configuration, not repository code):
  {"runtime":"local", "python":"/venv/bin/python", "repo":"/repos/lingbot-map",
   "checkpoint":"/models/lingbot-map-long.pt", "device":"cuda"}
@@ -21,6 +27,7 @@ import subprocess
 import uuid
 
 ADAPTER = Path(__file__).with_name('lingbot_inference.py')
+UPSTREAM_REPOSITORY = 'https://github.com/Robbyant/lingbot-map'
 
 
 def required(config, key):
@@ -53,7 +60,9 @@ def run(config, config_path, video, output, log):
         repo = local_path(required(config, 'repo'), base)
         checkpoint = local_path(required(config, 'checkpoint'), base)
         if not python.is_file():
-            raise FileNotFoundError(f'LingBot Python executable missing: {python}')
+            raise FileNotFoundError(f'LingBot Python executable missing: {python}. '
+                f'Install {UPSTREAM_REPOSITORY} in its own environment and set python, repo and checkpoint '
+                'in --lingbot-config (see lingbot.local.example.json).')
         argv = [str(python), str(ADAPTER), *adapter_args(config, repo, checkpoint, video, output)]
         subprocess.run(argv, cwd=repo, check=True, stdout=log, stderr=subprocess.STDOUT)
         return

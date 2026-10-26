@@ -11,6 +11,13 @@ YOLO detections; no tracking model is loaded. Optional scene paths reuse SAM3.
 For missing depth, --lingbot-config accepts a local or ssh-docker runtime JSON
 (see lingbot_runtime.py). LingBot stays in its own checkout/environment. The
 legacy --lingbot-command-config alias also supports custom command argv/cwd.
+
+External 3D dependency: https://github.com/Robbyant/lingbot-map
+Clone/install LingBot in a separate Python environment following its upstream
+instructions, and download lingbot-map-long.pt. Neither is included by cloning
+this project. Copy video_processing/lingbot.local.example.json, replace its
+python/repo/checkpoint paths, and pass it with --with-3d --lingbot-config FILE.
+Cached depth exports can be used without installing LingBot.
 """
 from __future__ import annotations
 
