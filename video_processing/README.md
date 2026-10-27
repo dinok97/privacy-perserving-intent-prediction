@@ -120,19 +120,37 @@ git-ignored).
 
 ### 4.2 SAM 3 setup
 
-> **TODO** – to be filled in by <!-- group member -->.
+The background segmentation scripts use the `facebook/sam3` model through Hugging Face Transformers. 
 
-**Requirements**
+### Prerequisites
 
-<!-- packages / versions, Hugging Face access to facebook/sam3, login token -->
+The model is gated: user must request and receive access before the scripts can download its weights. What to do are:
 
-**Steps**
+1. Sign in to Hugging Face or [create an account](https://huggingface.co/join).
+2. Open the [`facebook/sam3` model page](https://huggingface.co/facebook/sam3),
+   select **Agree and access repository** (or the equivalent access request
+   button), and review/accept the model's terms. Wait for access to be granted.
+   Approval is tied to your Hugging Face account; installing the Python package
+   alone does not grant access.
 
-<!-- step-by-step install and first run -->
+**Storage requirements**: The pretrained SAM 3 model requires approximately **6.9 GB** for the full set of model files. 
+Additional disk space is needed for Python dependencies, cached files, datasets, and segmentation outputs. Ensure sufficient free storage before the first run.
 
-**Suggested system requirements**
+### Steps
 
-<!-- GPU / VRAM, RAM, expected time per image on CPU vs GPU -->
+1. Install all required dependency by run command `pip install -r requirements.txt`.
+2. Get Hugging Face access token. Read more [here](https://huggingface.co/docs/hub/main/en/security-tokens#how-to-manage-user-access-tokens).
+3. Authenticate Hugging Face by run command `hf auth login`. Then enter you Hugging
+Face access token when prompted. 
+4. Done. The model will be downloaded at the first time of running the pipeline. Note that the model
+
+### Suggested system requirements
+
+- **Operating system**: Linux, Windows, or another environment supported by the required Python dependencies.
+- **Processing hardware**: A GPU is recommended for faster inference. CPU execution may be possible but significantly slower.
+- **RAM**: 16 GB is a reasonable starting point; 32 GB or more is preferable.
+- **Storage**: More than 10GB free storage available, since the `SAM3` model itself will take around 7GB of storage.
+
 
 ## 5. Running
 
