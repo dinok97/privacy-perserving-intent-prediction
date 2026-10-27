@@ -1,5 +1,5 @@
 """
-extract_features.py  –  MVP feature extractor (schema feat-0.3)
+feature_extractor.py  –  MVP feature extractor (schema feat-0.3)
 
 Inputs per clip (<stem> = <video>_<action>, action = enter/pass/exit):
     <stem>.json              trajectory + COCO-17 keypoints in pixels (Jesper's script)
@@ -8,21 +8,24 @@ Inputs per clip (<stem> = <video>_<action>, action = enter/pass/exit):
     <stem>_background.png    optional; used for brightness features and the debug overlay
     exits_<stem>.json        optional; hand-annotated exits replacing the automatic ones
 
-Output:
-    features_<stem>.json     {"info": {...provenance...}, "data": {...features...}}
-    feature_catalog.json     one entry per feature (name, level, unit, needs, causal)
+Output (next to the trajectory unless told otherwise):
+    <stem>_features.json        {"info": {...provenance...}, "data": {...features...}}
+    <stem>_features_debug.png   with debug=True: exits + trajectory overlay
+    feature_catalog.json        one entry per feature (name, level, unit, needs, causal)
 
 Design rules
     * Every per-frame feature is CAUSAL: it uses only the current and past frames,
       so it is safe for online prediction (the door must decide before arrival).
     * Whole-track features live in data.track_summary.hindsight and are flagged.
-    * Exits = detected doors + frame-edge gaps the floor reaches + floor tips cut off
-      by a wall; the target door is never a competitor. Exit order is only valid inside one file (no stable IDs).
+    * Exits = doors (floor-contact line, else bottom edge) + frame-border stretches the
+      floor touches + floor dead ends flanked by wall/door on both sides; the target door
+      is never a competitor. Exit order is only valid inside one file (no stable IDs).
     * Units are in the name: _px pixels, _bh body heights, _s seconds, _deg degrees.
 
 Usage
-    python extract_features.py --traj <stem>.json                 (sidecar files found by name)
-    python extract_features.py --input-dir data/enter --out-dir data/features --debug
+    from the pipeline:  feature_extractor.extract_features(traj_path, debug=True)
+    python feature_extractor.py --traj <stem>.json                (sidecar files found by name)
+    python feature_extractor.py --input-dir data/enter --out-dir data/features --debug
 """
 
 from __future__ import annotations
@@ -41,23 +44,31 @@ SCHEMA_VERSION = "feat-0.3"
 PARAMS = {
     "min_poly_area_px": 30,        # drop slivers / 2-point "polygons"
     "kp_conf_min": 0.3,            # keypoint counts as visible above this
-    "edge_band_px": 4,             # how far inward an edge pixel looks for a blocker
-    "min_gap_px": 15,              # narrower edge gaps are ignored
-    "inward_depth_px": 20,         # strip checked behind an edge gap
-    "inward_open_frac": 0.6,       # share of that strip that must be unblocked
-    "floor_touch_px": 12,          # floor must be this close to an edge gap for it to count
-    "tip_min_floor_frac": 0.10,    # floor patches smaller than this share of the largest
-                                   # patch never produce exits (stray specks of floor)
-    "tip_open_radius_px": 20,      # floor "body" = floor opened with a disk of this radius
-    "tip_min_protrusion_px": 10,   # tip must stick out this far beyond the body
-    "tip_dir_back_px": 20,         # tip direction measured over this much skeleton
-    "tip_look_px": 25,             # look this far beyond the tip for what cuts it off
-    "tip_cone_deg": 35,            # ... within this half-angle of the tip direction
-    "tip_merge_px": 30,            # tips closer than this are one exit
-    "edge_margin_px": 10,          # tips this close to the frame border are edge exits
-    "door_bottom_band_px": 15,     # fallback threshold: door points this close to its bottom
-    "door_contact_px": 6,          # door outline this close to floor = threshold
-    "door_min_contact_pts": 5,     # fewer contact points -> use the fallback
+    # exits (px values are for a 640 px wide frame and scale with resolution)
+    "edge_band_px": 3,             # 2a: floor this close to the border "touches" it
+    "edge_bridge_px": 10,          # 2a: short breaks in that contact are bridged
+    "min_gap_px": 15,              # 2a: narrower border stretches are ignored
+    "edge_door_overlap_frac": 0.3, # 2a: share of a stretch next to a door -> door wins
+    "door_lower_frac": 0.35,       # 1b: bottom edge = edges in the lowest 35% of the door
+    "door_contact_px": 6,          # 1: door outline this close to floor = contact
+    "door_near_floor_px": 16,      # 1: no contact -> floor this close (not through wall) counts
+    "door_contact_gap_pts": 3,     # 1: contact breaks of <= this many 2-px samples bridged
+    "door_straight_tol_px": 6,     # 1: contact is split into straight pieces at this tolerance
+    "door_extend_angle_deg": 20,   # 1: extension follows the outline while it turns less than this
+    "door_extend_look_px": 12,     # 1: ... measured over this much outline
+    "door_wall_px": 4,             # 1: extension stops where a wall is this close
+    "door_min_contact_pts": 5,     # 1: shorter contact -> 1b (bottom edge)
+    "door_bottom_band_px": 15,     # 1b last resort: lowest points of the door
+    "tip_min_floor_frac": 0.10,    # 2b: floor patches below this share of the largest are ignored
+    "tip_open_radius_px": 20,      # 2b: floor "body" = floor opened with a disk of this radius
+    "tip_min_protrusion_px": 10,   # 2b: dead end must stick out this far beyond the body
+    "tip_min_width_px": 12,        # 2b: narrower dead ends are slivers, not passages
+    "tip_dir_back_px": 20,         # 2b: dead-end direction measured over this much skeleton
+    "tip_flank_look_px": 60,       # 2b: search this far sideways for the flanking blockers
+    "tip_flank_max_gap_px": 32,    # 2b: max unlabelled gap between floor and a flank
+    "tip_flank_probes_px": [0, 5, 10],  # 2b: flank test at the tip and this far back
+    "tip_merge_px": 30,            # 2b: dead ends closer than this are one exit
+    "edge_margin_px": 10,          # 2b: dead ends this close to the border are left to 2a
     "origin_max_dist_bh": 1.0,     # first point within this of an exit => origin
     "min_speed_bh_s": 0.1,         # below this, heading/alignment are undefined
     "smooth_window": 3,            # causal moving average on ground point
@@ -125,6 +136,7 @@ class Scene:
     def __init__(self, scene_json: dict, W: int, H: int, target_px, manual_exits=None):
         self.manual_exits = manual_exits
         self.W, self.H = W, H
+        self.s = W / 640.0                 # pixel thresholds are tuned at 640 px width
         self.target = np.asarray(target_px, float)
         self.objects = []
         self.dropped = 0
@@ -162,28 +174,77 @@ class Scene:
         self.exits, self.target_info = self._find_exits()
 
     # -- exits -------------------------------------------------------------
+    # Pixel thresholds below are tuned at 640 px width and scaled by self.s.
+    #
+    # 1)  door  : exit line = the straight piece of door outline that touches (or nearly
+    #             touches) the floor, followed along the same edge while no wall borders it
+    #             (a carpet or the frame cut hides the rest of the floor); point = midpoint.
+    # 1b) door  : no floor contact -> bottom edge of the door, status no_floor_contact.
+    # 2a) edge  : stretch of the frame border the floor touches, limited to the floor.
+    # 2b) tip   : floor narrows into a dead end flanked on BOTH sides by wall/window/door.
+    #             An unlabelled flank is an unknown object (plant, chair, ...) -> no exit.
+
     def _door_exits(self):
-        out = []
+        P, out, s = PARAMS, [], self.s
+        r = int(round(P["door_contact_px"] * s))
+        touch_floor = cv2.dilate(self.floor, np.ones((2 * r + 1, 2 * r + 1), np.uint8))
+        # "near floor": floor grown a little further, but only through pixels that are not
+        # wall (a door that overlaps a wall label still counts as door)
+        passable = ((self.block == 0) | (self.door > 0)).astype(np.uint8)
+        near_floor = self.floor.copy()
+        for _ in range(int(round(P["door_near_floor_px"] * s))):
+            near_floor = cv2.dilate(near_floor, np.ones((3, 3), np.uint8)) & passable
+        r_w = int(round(P["door_wall_px"] * s))
+        wall_only = ((self.block > 0) & (self.door == 0)).astype(np.uint8)
+        by_wall = cv2.dilate(wall_only, np.ones((2 * r_w + 1, 2 * r_w + 1), np.uint8))
         for o in self.objects:
             if o["label"].lower() != "door":
                 continue
             p = np.asarray(o["polygon"], float)
-            # threshold line = the part of the door outline that touches the floor.
-            # Doors seen at an angle meet the floor along a slanted edge, so the lowest
-            # points alone give a tiny threshold.
-            contact = self._floor_contact(p)
-            if len(contact) >= PARAMS["door_min_contact_pts"]:
-                c0 = contact.mean(axis=0)
-                axis = np.linalg.svd(contact - c0)[2][0]
-                proj = (contact - c0) @ axis
-                segment = [(c0 + proj.min() * axis).tolist(), (c0 + proj.max() * axis).tolist()]
-                anchor, thr_src = c0, "floor_contact"
+            y_min, y_max = p[:, 1].min(), p[:, 1].max()
+            band_y = y_max - P["door_lower_frac"] * (y_max - y_min)   # lower part (fallback)
+            pts = self._outline(p)                                     # dense outline samples
+            on_border = np.array([self._on_border(q) for q in pts])
+            # seed: where the door touches the floor; else where it is near the floor
+            seed, thr_src = None, None
+            for mask, src in ((touch_floor, "floor_contact"), (near_floor, "near_floor")):
+                ok = np.array([self.inside(mask, q) for q in pts]) & ~on_border
+                seed = self._seed_piece(pts, ok)
+                if seed is not None:
+                    thr_src = src
+                    break
+            if seed is not None:
+                # follow the same straight door edge while no wall borders it (carpet,
+                # shadow or the frame cut can hide the floor along the rest of the threshold)
+                lo, hi = self._extend_straight(pts, seed, on_border, by_wall)
+                idx = [(lo + k) % len(pts) for k in range((hi - lo) % len(pts) + 1)]
+                segment = self._clip(self._pca_segment(pts[idx]))
+                if (hi - lo) % len(pts) + 1 > len(seed):
+                    thr_src += "+extended"
+                status = "detected"
             else:
-                ymax = p[:, 1].max()
-                bottom = p[p[:, 1] >= ymax - PARAMS["door_bottom_band_px"]]
-                anchor = np.array([bottom[:, 0].mean(), ymax])
-                segment = [[bottom[:, 0].min(), ymax], [bottom[:, 0].max(), ymax]]
-                thr_src = "lowest_points"
+                # bottom edge: outline edges in the lower part that run more sideways than
+                # up, sampled by length; edges lying on the left/right/top frame border are
+                # where the image cuts the door, not its bottom
+                bottom = []
+                for a, b in zip(p, np.roll(p, -1, axis=0)):
+                    if not (a[1] >= band_y and b[1] >= band_y and abs(b[1] - a[1]) < abs(b[0] - a[0])):
+                        continue
+                    on_side = (max(a[0], b[0]) <= 2) or (min(a[0], b[0]) >= self.W - 3) \
+                        or (max(a[1], b[1]) <= 2)
+                    if on_side:
+                        continue
+                    k = max(int(np.hypot(*(b - a)) / 2), 1)
+                    bottom += [a + t * (b - a) for t in np.linspace(0, 1, k + 1)]
+                if len(bottom) >= 2:
+                    segment = self._clip(self._pca_segment(np.asarray(bottom)))
+                    thr_src = "bottom_edge"
+                else:
+                    low = p[p[:, 1] >= y_max - P["door_bottom_band_px"] * self.s]
+                    segment = [[low[:, 0].min(), y_max], [low[:, 0].max(), y_max]]
+                    thr_src = "lowest_points"
+                status = "no_floor_contact"
+            anchor = (np.asarray(segment[0]) + np.asarray(segment[1])) / 2
             x0, y0 = p.min(axis=0)
             x1, y1 = p.max(axis=0)
             contains_target = cv2.pointPolygonTest(
@@ -193,88 +254,151 @@ class Scene:
                 "anchor_px": anchor, "segment_px": segment, "centroid_px": p.mean(axis=0),
                 "bbox_px": [x0, y0, x1, y1], "width_px": x1 - x0,
                 "area_frac": poly_area(o["polygon"]) / (self.W * self.H),
-                "span_px": None, "status": "detected", "threshold_src": thr_src,
+                "span_px": None, "status": status, "threshold_src": thr_src,
                 "threshold_len_px": float(np.hypot(*np.subtract(segment[1], segment[0]))),
                 "seg_source": o.get("source"), "confidence": o.get("confidence"),
                 "_poly": p.astype(np.int32), "_is_target": contains_target,
             })
         return out
 
-    def _floor_contact(self, poly):
-        """Points along a polygon outline (every ~2 px) that lie within a few px of floor."""
-        r = PARAMS["door_contact_px"]
-        near = cv2.dilate(self.floor, np.ones((2 * r + 1, 2 * r + 1), np.uint8))
+    def _on_border(self, q, tol=2):
+        return q[0] <= tol or q[1] <= tol or q[0] >= self.W - 1 - tol or q[1] >= self.H - 1 - tol
+
+    def _seed_piece(self, pts, ok):
+        """Contact samples -> continuous runs -> straight pieces; return the index list of
+        the longest straight piece (or None)."""
+        P, n = PARAMS, len(pts)
+        if n == 0 or not ok.any():
+            return None
+        start = int(np.argmin(ok)) if not ok.all() else 0
+        order = [(start + i) % n for i in range(n)]
+        runs, cur, gap = [], [], 0
+        for i in order:
+            if ok[i]:
+                cur.append(i)
+                gap = 0
+            elif cur:
+                gap += 1
+                if gap > P["door_contact_gap_pts"]:
+                    runs.append(cur)
+                    cur, gap = [], 0
+        if cur:
+            runs.append(cur)
+        tol = P["door_straight_tol_px"] * self.s
+        pieces = []
+        for run in runs:
+            pieces += self._split_straight(pts, run, tol)
+        pieces = [q for q in pieces if len(q) >= P["door_min_contact_pts"]]
+        if not pieces:
+            return None
+        return max(pieces, key=lambda q: np.hypot(*(pts[q[-1]] - pts[q[0]])))
+
+    @classmethod
+    def _split_straight(cls, pts, run, tol):
+        """Douglas-Peucker split of an index run into roughly straight pieces."""
+        if len(run) < 3:
+            return [run]
+        a, b = pts[run[0]], pts[run[-1]]
+        ab = b - a
+        L = np.hypot(*ab)
+        if L < 1e-6:
+            d = np.hypot(*(pts[run] - a).T)
+        else:
+            v = pts[run] - a
+            d = np.abs(ab[0] * v[:, 1] - ab[1] * v[:, 0]) / L
+        k = int(np.argmax(d))
+        if d[k] <= tol or k in (0, len(run) - 1):
+            return [run]
+        return cls._split_straight(pts, run[:k + 1], tol) + cls._split_straight(pts, run[k:], tol)
+
+    def _extend_straight(self, pts, seed, on_border, by_wall):
+        """Grow the seed piece along the outline in both directions while the outline keeps
+        the piece's direction and is not on the frame border or next to a wall."""
+        P, n = PARAMS, len(pts)
+        cos_max = math.cos(math.radians(P["door_extend_angle_deg"]))
+        look = max(int(P["door_extend_look_px"] * self.s / 2), 2)      # samples are 2 px apart
+        d0 = pts[seed[-1]] - pts[seed[0]]
+        d0 = d0 / (np.hypot(*d0) + 1e-9)
+        lo, hi = seed[0], seed[-1]
+        for step, dirv in ((1, d0), (-1, -d0)):
+            end = hi if step == 1 else lo
+            for _ in range(n - len(seed)):
+                nxt = (end + step) % n
+                if on_border[nxt] or self.inside(by_wall, pts[nxt]):
+                    break
+                ahead = pts[(end + step * look) % n] - pts[end]
+                if np.hypot(*ahead) < 1e-6 or (ahead @ dirv) / np.hypot(*ahead) < cos_max:
+                    break
+                end = nxt
+            if step == 1:
+                hi = end
+            else:
+                lo = end
+        return lo, hi
+
+    @staticmethod
+    def _outline(poly, step=2.0):
         pts = []
         for a, b in zip(poly, np.roll(poly, -1, axis=0)):
-            k = max(int(np.hypot(*(b - a)) / 2), 1)
-            for s in np.linspace(0, 1, k, endpoint=False):
-                q = a + s * (b - a)
-                x, y = int(round(q[0])), int(round(q[1]))
-                if 0 <= x < self.W and 0 <= y < self.H and near[y, x]:
-                    pts.append(q)
-        return np.asarray(pts).reshape(-1, 2)
+            k = max(int(np.hypot(*(b - a)) / step), 1)
+            pts += [a + s * (b - a) for s in np.linspace(0, 1, k, endpoint=False)]
+        return np.asarray(pts)
 
-    def _edge_profile(self, edge):
-        """Return (blocked[1D], floor_near[1D], inward_open[1D]) along an edge."""
-        b, d, f = PARAMS["edge_band_px"], PARAMS["inward_depth_px"], PARAMS["floor_touch_px"]
-        hard = self.block | self.door
-        if edge == "top":
-            sl = lambda m, k: m[:k, :].T
-        elif edge == "bottom":
-            sl = lambda m, k: m[-k:, :].T
-        elif edge == "left":
-            sl = lambda m, k: m[:, :k]
-        else:
-            sl = lambda m, k: m[:, -k:]
-        blocked = sl(hard, b).any(axis=1)
-        floor_near = sl(self.floor, f).any(axis=1)
-        inward_open = 1.0 - sl(hard, d).mean(axis=1)
-        return blocked, floor_near, inward_open
+    def _clip(self, seg):
+        return [[float(np.clip(x, 0, self.W - 1)), float(np.clip(y, 0, self.H - 1))] for x, y in seg]
+
+    @staticmethod
+    def _pca_segment(q):
+        c0 = q.mean(axis=0)
+        if len(q) < 2 or np.allclose(q, c0):
+            return [c0.tolist(), c0.tolist()]
+        axis = np.linalg.svd(q - c0)[2][0]
+        proj = (q - c0) @ axis
+        return [(c0 + proj.min() * axis).tolist(), (c0 + proj.max() * axis).tolist()]
 
     def _edge_exits(self):
+        """2a: stretches of the frame border where the floor is the last thing visible."""
+        P = PARAMS
+        b = max(int(round(P["edge_band_px"] * self.s)), 1)
+        min_w = P["min_gap_px"] * self.s
+        bridge = int(round(P["edge_bridge_px"] * self.s))
+        door_near = cv2.dilate(self.door, np.ones((7, 7), np.uint8))
         out, target_gap = [], None
         for edge in ("top", "bottom", "left", "right"):
-            blocked, floor_near, inward_open = self._edge_profile(edge)
-            n = len(blocked)
-            i = 0
+            sl = {"top": lambda m: m[:b, :].T, "bottom": lambda m: m[-b:, :].T,
+                  "left": lambda m: m[:, :b], "right": lambda m: m[:, -b:]}[edge]
+            touch = sl(self.floor).any(axis=1)
+            doorish = sl(door_near).any(axis=1)
+            n, i = len(touch), 0
             while i < n:
-                if blocked[i]:
+                if not touch[i]:
                     i += 1
                     continue
-                j = i
-                while j < n and not blocked[j]:
+                j, gap = i, 0
+                while j < n and (touch[j] or gap < bridge):
+                    gap = 0 if touch[j] else gap + 1
                     j += 1
-                a, bnd = i, j - 1            # inclusive span
+                a, bnd = i, j - 1 - gap                     # trim bridged tail
                 i = j
-                if bnd - a + 1 < PARAMS["min_gap_px"]:
+                if bnd - a + 1 < min_w:
                     continue
-                if inward_open[a:bnd + 1].mean() < PARAMS["inward_open_frac"]:
+                # overlap rule: a door at this stretch of border wins over the edge exit
+                if doorish[a:bnd + 1].mean() >= P["edge_door_overlap_frac"]:
                     continue
-                mid = (a + bnd) / 2
                 if edge in ("top", "bottom"):
                     yy = 0 if edge == "top" else self.H - 1
-                    anchor = np.array([mid, yy])
                     segment = [[a, yy], [bnd, yy]]
                 else:
                     xx = 0 if edge == "left" else self.W - 1
-                    anchor = np.array([xx, mid])
                     segment = [[xx, a], [xx, bnd]]
-
-                # unlabelled != walkable (dark walls are often unlabelled), so an edge
-                # gap only counts when the floor actually reaches it
-                if not floor_near[a:bnd + 1].any():
-                    continue
-                status = "detected"
-
+                anchor = (np.asarray(segment[0], float) + np.asarray(segment[1], float)) / 2
                 ex = {
                     "type": "edge", "edge": edge, "anchor_px": anchor, "segment_px": segment,
                     "centroid_px": anchor, "bbox_px": None,
                     "width_px": bnd - a + 1, "area_frac": None,
-                    "span_px": [a, bnd], "status": status,
-                    "seg_source": "floor",
+                    "span_px": [a, bnd], "status": "detected", "seg_source": "floor",
                     "confidence": None, "_poly": None, "_is_target": False,
                 }
-                # the gap the target door sits in is the target, not a competitor
                 tx, ty = self.target
                 on_this_edge = {"top": ty <= 10, "bottom": ty >= self.H - 11,
                                 "left": tx <= 10, "right": tx >= self.W - 11}[edge]
@@ -285,21 +409,29 @@ class Scene:
                 out.append(ex)
         return out, target_gap
 
-    def _floor_tip_exits(self):
-        """Exits where the floor sticks out and is then cut off by a wall
-        (a corridor continuing behind an occluding wall).
+    def _march(self, lab, fl, p, d, max_d):
+        """From p walk along d: cross the floor, then count unlabelled px until the first
+        labelled blocker. Returns (blocker label or None, unlabelled gap in px)."""
+        s, left_floor = 0, None
+        while s < max_d:
+            x, y = int(round(p[0] + d[0] * s)), int(round(p[1] + d[1] * s))
+            if not (0 <= x < self.W and 0 <= y < self.H):
+                return None, None                         # ran out of the frame
+            if lab[y, x]:
+                return int(lab[y, x]), (s - left_floor) if left_floor is not None else 0
+            if left_floor is None and not fl[y, x]:
+                left_floor = s
+            s += 1
+        return None, None
 
-        1. Skeleton endpoints of the floor mask are candidate tips.
-        2. Keep tips that protrude beyond the floor 'body' (floor opened with a disk).
-        3. Look beyond the tip, in its direction: the nearest blocker decides.
-           wall/window -> exit; door -> it is that door's floor (skip); nothing -> noise.
-        """
+    def _floor_tip_exits(self):
+        """2b: the floor narrows into a dead end that is flanked on both sides by
+        wall/window/door (a corridor mouth). Unlabelled flanks = unknown object -> no exit."""
         from skimage.morphology import skeletonize
-        P = PARAMS
+        P, s = PARAMS, self.s
         if not self.floor.any():
             return []
         fl = cv2.morphologyEx(self.floor, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        # keep only floor patches big enough to walk on
         n_cc, cc, stats, _ = cv2.connectedComponentsWithStats(fl, connectivity=8)
         if n_cc <= 1:
             return []
@@ -310,7 +442,7 @@ class Scene:
         pts = set(zip(*np.nonzero(sk)))
         nb = lambda q: [(q[0] + dy, q[1] + dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
                         if (dy or dx) and (q[0] + dy, q[1] + dx) in pts]
-        r = P["tip_open_radius_px"]
+        r = int(round(P["tip_open_radius_px"] * s))
         body = cv2.morphologyEx(fl, cv2.MORPH_OPEN,
                                 cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
         d_body = cv2.distanceTransform((1 - body).astype(np.uint8), cv2.DIST_L2, 5)
@@ -318,19 +450,20 @@ class Scene:
         lab = np.zeros((self.H, self.W), np.uint8)          # 1 = wall/window, 2 = door
         lab[self.block > 0] = 1
         lab[self.door > 0] = 2
-        m, R = P["edge_margin_px"], P["tip_look_px"]
-        cos_min = math.cos(math.radians(P["tip_cone_deg"]))
+        m = P["edge_margin_px"] * s
+        max_gap = P["tip_flank_max_gap_px"] * s
+        look = P["tip_flank_look_px"] * s
 
         cands = []
         for e in [q for q in pts if len(nb(q)) == 1]:
             y, x = e
             if x < m or y < m or x > self.W - 1 - m or y > self.H - 1 - m:
-                continue                                    # frame-edge exits handled elsewhere
+                continue                                    # border is handled by 2a
             protr = float(d_body[y, x])
-            if protr < P["tip_min_protrusion_px"]:
+            if protr < P["tip_min_protrusion_px"] * s:
                 continue
             path, prev, cur = [e], None, e                  # walk back along the branch
-            while len(path) <= P["tip_dir_back_px"]:
+            while len(path) <= P["tip_dir_back_px"] * s:
                 nxt = [q for q in nb(cur) if q != prev]
                 if not nxt:
                     break
@@ -341,35 +474,40 @@ class Scene:
             if np.linalg.norm(d) < 1e-6:
                 continue
             d /= np.linalg.norm(d)
-            # nearest blocker inside the look-ahead cone
-            y0, y1 = max(0, y - R), min(self.H, y + R + 1)
-            x0, x1 = max(0, x - R), min(self.W, x + R + 1)
-            yy, xx = np.nonzero(lab[y0:y1, x0:x1])
-            if not len(yy):
-                continue
-            vx, vy = xx + x0 - x, yy + y0 - y
-            dist = np.hypot(vx, vy)
-            ok = (dist > 0) & (dist <= R) & ((vx * d[0] + vy * d[1]) >= cos_min * dist)
-            if not ok.any():
-                continue
-            k = np.argmin(np.where(ok, dist, np.inf))
-            if lab[yy[k] + y0, xx[k] + x0] != 1:
-                continue                                    # a door is beyond: not a new exit
-            half = max(float(np.max([d_floor[q] for q in path])), 5.0)
             perp = np.array([-d[1], d[0]])
+            half = float(np.max([d_floor[q] for q in path]))
+            if 2 * half < P["tip_min_width_px"] * s:
+                continue                                    # too narrow to walk through
             tip = np.array([x, y], float)
+            # the floor running straight into a door is that door's threshold
+            ahead, gap_a = self._march(lab, fl, tip, d, look)
+            if ahead == 2 and gap_a <= max_gap:
+                continue
+            # flanks: test at the tip and a little way back; a majority must be closed
+            closed, flank_lab = 0, set()
+            probes = [path[min(int(k * s), len(path) - 1)] for k in P["tip_flank_probes_px"]]
+            for q in probes:
+                qp = np.array([q[1], q[0]], float)
+                la, ga = self._march(lab, fl, qp, perp, look)
+                lb, gb = self._march(lab, fl, qp, -perp, look)
+                if la and lb and ga <= max_gap and gb <= max_gap:
+                    closed += 1
+                    flank_lab |= {la, lb}
+            if closed * 2 <= len(probes):
+                continue
             cands.append({
                 "type": "floor_tip", "edge": None, "anchor_px": tip,
                 "segment_px": [(tip - perp * half).tolist(), (tip + perp * half).tolist()],
                 "centroid_px": tip, "bbox_px": None, "width_px": 2 * half, "area_frac": None,
                 "span_px": None, "status": "inferred", "seg_source": "floor",
                 "confidence": None, "direction": d.tolist(), "protrusion_px": protr,
-                "blocked_by": "wall", "_poly": None, "_is_target": False,
+                "flanked_by": sorted({1: "wall", 2: "door"}[v] for v in flank_lab),
+                "_poly": None, "_is_target": False,
             })
         cands.sort(key=lambda c: -c["protrusion_px"])
         kept = []
         for c in cands:
-            if all(np.hypot(*(c["anchor_px"] - k["anchor_px"])) > P["tip_merge_px"] for k in kept):
+            if all(np.hypot(*(c["anchor_px"] - k["anchor_px"])) > P["tip_merge_px"] * s for k in kept):
                 kept.append(c)
         return kept
 
@@ -465,6 +603,7 @@ class Scene:
                 "n_door": sum(e["type"] == "door" for e in self.exits),
                 "n_edge": sum(e["type"] == "edge" for e in self.exits),
                 "n_floor_tip": sum(e["type"] == "floor_tip" for e in self.exits),
+                "n_door_no_floor_contact": sum(e["status"] == "no_floor_contact" for e in self.exits),
                 "n_manual": sum(e["status"] == "manual" for e in self.exits),
             },
             "areas": {
@@ -963,10 +1102,22 @@ def load(p):
         return json.load(f)
 
 
+def write_catalog(out_dir):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "feature_catalog.json", "w", encoding="utf-8") as f:
+        json.dump({"schema_version": SCHEMA_VERSION, "features": CATALOG}, f, indent=1)
+
+
 def run_clip(traj_p, scene_p, pose_p=None, bg_p=None, out_p=None, debug=False, exits_p=None):
-    traj_p = Path(traj_p)
+    traj_p, scene_p = Path(traj_p), Path(scene_p)
+    if not traj_p.is_file():
+        raise FileNotFoundError(f"[Extract Features] trajectory not found: {traj_p}")
+    if not scene_p.is_file():
+        raise FileNotFoundError(f"[Extract Features] segmentation not found: {scene_p} "
+                                f"(expected <stem>_background.json next to the trajectory)")
     pose = load(pose_p) if pose_p and Path(pose_p).is_file() else None
-    sources = {"trajectory": traj_p.name, "scene": Path(scene_p).name,
+    sources = {"trajectory": traj_p.name, "scene": scene_p.name,
                "pose": Path(pose_p).name if pose else None,
                "background": Path(bg_p).name if bg_p and Path(bg_p).is_file() else None,
                "depth": None}
@@ -982,26 +1133,35 @@ def run_clip(traj_p, scene_p, pose_p=None, bg_p=None, out_p=None, debug=False, e
     return out_p
 
 
-def extract_features(trajectory_path: str, debug=False, exits_p: str = None):
+def extract_features(trajectory_path, debug=False, exits_p=None, scene_path=None, out_path=None,
+                     pose_path=None, background_path=None):
+    """Pipeline entry point (called by the pipeline script for every processed clip).
+
+    trajectory_path : <stem>.json from the trajectory tracker
+    debug           : also write <stem>_features_debug.png
+    exits_p         : hand-annotated exits; default exits_<stem>.json next to the trajectory
+    scene_path      : segmentation JSON; default <stem>_background.json next to the trajectory
+    out_path        : default <stem>_features.json next to the trajectory
+    pose_path       : default <stem>_pose.json (optional file)
+    background_path : default <stem>_background.png (optional file)
+    Returns the path of the written features file. Also writes feature_catalog.json
+    into the same folder.
+    """
     if not trajectory_path:
         raise SystemExit("[Extract Features] : Please specify trajectory file path")
-    
-    traj_path = Path(trajectory_path)
-    back_path_json =  traj_path.with_name(f"{traj_path.stem}_background.json")
-    back_path_png = traj_path.with_name(f"{traj_path.stem}_background.png")
-    pose_path_json =  traj_path.with_name(f"{traj_path.stem}_pose.json")
-    out_path_json =  traj_path.with_name(f"{traj_path.stem}_features.json")
-    
-    out_path = run_clip(
-            traj_path, 
-            back_path_json, 
-            pose_path_json,
-            back_path_png, 
-            out_path_json, 
-            debug, 
-            exits_p
-        )
-    cat_dir = Path(out_path).parent
+    tp = Path(trajectory_path)
+    side = lambda suffix: tp.with_name(f"{tp.stem}{suffix}")
+    if exits_p is None and tp.with_name(f"exits_{tp.stem}.json").is_file():
+        exits_p = tp.with_name(f"exits_{tp.stem}.json")
+    out = run_clip(tp,
+                   scene_path or side("_background.json"),
+                   pose_path or side("_pose.json"),
+                   background_path or side("_background.png"),
+                   out_path or side("_features.json"),
+                   debug,
+                   exits_p)
+    write_catalog(Path(out).parent)
+    return out
 
 
 def main():
@@ -1010,9 +1170,9 @@ def main():
     ap.add_argument("--scene", help="default: <stem>_background.json")
     ap.add_argument("--pose")
     ap.add_argument("--background")
-    ap.add_argument("--out")
+    ap.add_argument("--out", help="default: <stem>_features.json")
     ap.add_argument("--exits", help='optional hand-annotated exits: {"exits": [{"type": ..., "segment_px": [[x,y],[x,y]]}]}')
-    ap.add_argument("--input-dir", help="batch: finds <stem>.json + scene_<stem>.json pairs")
+    ap.add_argument("--input-dir", help="batch: every <stem>.json that has a <stem>_background.json")
     ap.add_argument("--out-dir")
     ap.add_argument("--debug", action="store_true", help="also write an overlay PNG with exits and trajectory")
     a = ap.parse_args()
@@ -1023,27 +1183,24 @@ def main():
         od = Path(a.out_dir) if a.out_dir else d
         for traj_p in sorted(d.glob("*.json")):
             s = traj_p.stem
-            if s.startswith(("features_", "exits_")) or s == "feature_catalog" \
-                    or s.endswith(("_pose", "_background")):
+            if s.startswith("exits_") or s == "feature_catalog" \
+                    or s.endswith(("_pose", "_background", "_features")):
                 continue
             scene_p = d / f"{s}_background.json"
             if not scene_p.is_file():
                 print(f"skip {s}: no {scene_p.name}")
                 continue
             outs.append(run_clip(traj_p, scene_p, d / f"{s}_pose.json", d / f"{s}_background.png",
-                                 od / f"features_{s}.json", a.debug,
+                                 od / f"{s}_features.json", a.debug,
                                  a.exits or d / f"exits_{s}.json"))
-        cat_dir = od
+        write_catalog(od)
     else:
         if not a.traj:
             ap.error("give --traj, or --input-dir")
         tp = Path(a.traj)
         side = lambda suffix, given: given or tp.with_name(f"{tp.stem}{suffix}")
-        outs.append(run_clip(tp, side("_background.json", a.scene), side("_pose.json", a.pose),
-                             side("_background.png", a.background), a.out, a.debug, a.exits))
-        cat_dir = Path(outs[0]).parent
-    with open(cat_dir / "feature_catalog.json", "w", encoding="utf-8") as f:
-        json.dump({"schema_version": SCHEMA_VERSION, "features": CATALOG}, f, indent=1)
+        outs.append(extract_features(tp, debug=a.debug, exits_p=a.exits, scene_path=a.scene,
+                                     out_path=a.out, pose_path=a.pose, background_path=a.background))
     for o in outs:
         print(f"wrote {o}")
 
