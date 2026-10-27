@@ -3,8 +3,8 @@
 ## 1. Project
 
 An automatic door should open for people who are about to **enter**, and stay
-shut for people who only **pass** by or **exit**. Jesper Malmgren's master's
-thesis (SeamAI) showed that this intent can be predicted from a person's pose
+shut for people who only **pass** by. Jesper Malmgren's master's
+thesis showed that this intent can be predicted from a person's pose
 and trajectory, using a single camera above one door.
 
 This project extends that work so the prediction **generalises to new
@@ -26,8 +26,9 @@ so the supervisors and the later classification model can choose which to use.
 2. [Table of contents](#2-table-of-contents)
 3. [Structure](#3-structure)
 4. [Setup](#4-setup)
-   - [4.1 General setup](#41-general-setup)
-   - [4.2 SAM 3 setup](#42-sam-3-setup)
+   - [4.1 Clone the repository](#41-clone-the-repository)
+   - [4.2 General setup](#42-general-setup)
+   - [4.3 SAM 3 setup](#43-sam-3-setup)
 5. [Running](#5-running)
    - [5.1 Running the whole pipeline](#51-running-the-whole-pipeline)
    - [5.2 Running scripts separately](#52-running-scripts-separately)
@@ -62,7 +63,7 @@ video_processing/
 
 ### Pipeline
 
-Every step is its own script, so any step can be re-run or replaced alone.
+Every step is its own script, so any step can later be re-run.
 
 ```
 video.mp4
@@ -81,44 +82,48 @@ features_<clip>.json
   │ 5. (optional) depth + 3D scripts → distances in metres
 ```
 
-Why this order:
-
-- **Undistort first.** Depth and 3D mapping assume a straight-line (pinhole)
-  camera. If only the background were undistorted, the person's trajectory and
-  the scene would live in different geometries and every distance between them
-  would be wrong. So both the tracker and the background step read the
-  undistorted video.
-- **Track before the background.** The tracker cuts the video into clips and
-  names them `<clip>` = `<video>_<action>`. The scene files are named after
-  those clips (`<clip>_background.json`), so the clip names have to exist first.
-- **Median background.** People move, so at each pixel the most common value
-  over the video is the empty room. Segmenting that one image gives the static
-  scene once per camera position instead of once per frame.
-- **Features before aggregation.** Per-frame values are kept, so any window or
-  summary statistic can be computed later without re-running the pipeline.
-
 ## 4. Setup
 
-### 4.1 General setup
-
+### 4.1 Clone the repository
+ 
+All code lives in the group's GitHub repository. Clone it and move into the
+`video_processing/` folder; every command below is run from there.
+ 
+```bash
+git clone https://github.com/dinok97/privacy-perserving-intent-prediction.git
+cd privacy-perserving-intent-prediction/video_processing
+```
+ 
+To get the latest changes later:
+ 
+```bash
+git pull
+```
+ 
+Videos, model weights and outputs are not in the repository (they are
+git-ignored), so after cloning you still need to add your own videos to
+`source/` and download the model weights (see below).
+ 
+### 4.2 General setup
+ 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt                       # steps 1–5
-pip install -r requirements-background-depth.txt     # step 6 (3D), optional
+pip install -r requirements-background-depth.txt     # step 5 (3D), optional
 python3 check_env.py
 ```
-
+ 
 For CPU-only Linux, install the CPU PyTorch wheels first if needed:
-
+ 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
-
+ 
 Download `yolo11n-pose.pt` and place it in this folder (model weights are
 git-ignored).
-
-### 4.2 SAM 3 setup
+ 
+### 4.3 SAM 3 setup
 
 The background segmentation scripts use the `facebook/sam3` model through Hugging Face Transformers. 
 
@@ -156,21 +161,7 @@ Face access token when prompted.
 
 ### 5.1 Running the whole pipeline
 
-> `pipeline.py` is not in the repository yet. This section describes how it
-> will work; update the commands once it is merged.
-
-```bash
-python pipeline.py <video or folder>          # final JSON only
-python pipeline.py <video or folder> --debug  # all intermediate files too
-```
-
-| Mode | Writes |
-|---|---|
-| default | `features_<clip>.json` + `feature_catalog.json` |
-| `--debug` | the above, plus every intermediate file: lens JSON, background image, segmentation JSON + overlay, trajectory and pose JSON, feature debug overlay |
-
-Use `--debug` when setting up a new camera location: the overlay images show at
-a glance whether the floor, walls and exits were found correctly.
+***TODO***
 
 ### 5.2 Running scripts separately
 
@@ -180,12 +171,7 @@ re-tracking. Commands, inputs and the files each script writes are listed in
 
 ## 6. Output
 
-The final output per clip is **`features_<clip>.json`**, plus one
-**`feature_catalog.json`** per output folder that lists every feature with its
-unit, the inputs it needs and whether it is safe for online prediction.
-
-Every feature – layout, exits, units and meaning – is described in
-**[FEATURES.md](FEATURES.md)**.
+***TODO***
 
 ## 7. Known gaps
 
