@@ -299,6 +299,8 @@ def run_trajectory_tracker(source_dir, output, manifest, device, progress):
                                 processed_manifest=manifest, device=device)
     if not Path(manifest).is_file():
         raise FileNotFoundError(f'Tracker finished but wrote no manifest: {manifest}')
+    if not geometry.load(manifest):
+        raise RuntimeError('Tracker saved no clips; see the [REMOVED] lines in the log file for the reasons')
     logger.debug('Tracker wrote manifest %s', manifest)
     return result
 

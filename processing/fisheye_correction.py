@@ -320,7 +320,8 @@ def correct_video(video_path, balance=BALANCE):
     return str(result)
 
 
-def correct_videos(videos: list[str]):
+def correct_videos(videos: list[str], on_progress=None):
+    """Correct every video; on_progress, if given, is called after each one."""
     if not videos:
         raise SystemExit("Nothing to do: fill in VIDEOS or pass video paths")
 
@@ -336,6 +337,8 @@ def correct_videos(videos: list[str]):
                   f"{100 * lens['corner_distortion']:.0f} %, saved {result}")
         else:
             print(f"  use the staged video: {result}")
+        if on_progress:
+            on_progress()
 
 
 def main():

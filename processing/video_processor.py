@@ -35,7 +35,7 @@ How to run
 Output is written under ../data:
   data/2026-05-29/
     <name>.mp4  <name>.json  <name>_pose.json     one set per clip
-    <name>.mp4.part                               clip still being written (or left by a crash)
+    <name>.part.mp4                               clip still being written (or left by a crash)
     clips.csv                                     one row per clip: label, cleaning result, files
     session_<date>_<time>.json                    one metadata file per recording session
 
@@ -565,12 +565,17 @@ class LivePoseCollector:
         source_occurrence = self.source_clip_counts[self.current_source_stem]
         base = clip_basename(self.current_source_stem, source_occurrence)
         if self.cfg.save_clips:
-            # written as <name>.mp4.part and renamed when the clip is finished, so a
-            # crash never leaves a half-written file that looks like a real clip
-            temp_path = self.date_dir / f"{base}.mp4.part"
+            # written as <name>.part.mp4 and renamed when the clip is finished, so a
+            # crash never leaves a half-written file that looks like a real clip.
+            # The name must END in .mp4: OpenCV picks the container from the
+            # extension and silently writes nothing for an unknown one like ".part".
+            temp_path = self.date_dir / f"{base}.part.mp4"
             writer = cv2.VideoWriter(
                 str(temp_path), cv2.VideoWriter_fourcc(*"mp4v"),
                 self.record_fps, (self.clean_width, self.clean_height))
+            if not writer.isOpened():
+                print(f"[WARN] could not open a video writer for {temp_path.name}; "
+                      "this clip will be removed as mp4_unreadable_or_corrupt")
         else:
             temp_path = None
             writer = None
@@ -948,8 +953,10 @@ class LivePoseCollector:
             self.cap.release()
             self.cap = None
 
-    def run(self, display: bool = True):
-        """Process all configured videos. display=False runs headlessly."""
+    def run(self, display: bool = True, on_progress=None):
+        """Process all configured videos. display=False runs headlessly.
+
+        on_progress, if given, is called once after each finished video."""
         cv2 = self.cv2
         action = "Recording" if self.cfg.save_clips else "Monitoring (not saving)"
         sources = self._source_paths()
@@ -969,6 +976,8 @@ class LivePoseCollector:
                 self._reset_tracker()
                 if not self._run_source(source, display):
                     break
+                if on_progress:
+                    on_progress()
         except KeyboardInterrupt:
             print("\n[RUN] Stopped by user (Ctrl+C).")
         finally:
@@ -1033,7 +1042,8 @@ def _config_to_jsonable(cfg: CollectorConfig) -> dict:
 # ---------------------------------------------------------------------------
 # Run the collector
 # ---------------------------------------------------------------------------
-def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu") -> list[str]:
+def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu",
+        on_progress=None) -> list[str]:
     # ----------------------------------------------------------------------- #
     # Settings -- edit these, then just run the script (Run in your editor, or #
     # `python video_processor.py`). No command-line arguments are needed. #
@@ -1069,7 +1079,7 @@ def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu"
     cfg.output_root = str(output_root or Path(__file__).resolve().parents[1] / "data")
 
     collector = LivePoseCollector(cfg)
-    collector.run(display=not cfg.headless)
+    collector.run(display=not cfg.headless, on_progress=on_progress)
     return collector.processed_video_paths
 
 

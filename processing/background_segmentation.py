@@ -211,8 +211,11 @@ def segment_image(image_path, model, processor):
 def segment_images(
     images: list[str],
     dest_dir: str = "",
+    on_progress=None,
 ):
-    """Segment images and export JSON and overlays without FiftyOne."""
+    """Segment images and export JSON and overlays without FiftyOne.
+
+    on_progress, if given, is called after each image (ok=False for a skipped one)."""
     # Load the model only once.
     model, processor = load_model()
 
@@ -223,6 +226,8 @@ def segment_images(
 
         if not image_path.is_file():
             print(f"Skipping missing image: {image_path}")
+            if on_progress:
+                on_progress(ok=False)
             continue
 
         start = time.perf_counter()
@@ -251,6 +256,9 @@ def segment_images(
             print(f"  JSON: {json_path}")
             print(f"  Overlay: {overlay_path}")
             print(f"  Image total: {elapsed:.2f}s")
+
+        if on_progress:
+            on_progress()
 
     print(
         f"\nAll done in "
