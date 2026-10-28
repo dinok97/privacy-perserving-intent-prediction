@@ -1,6 +1,6 @@
 """Contract tests for joining existing tracking/2D outputs with the 3D stages.
 
-Run: python -m unittest discover -s video_processing/tests -v
+Run: python -m unittest discover -s tests -v
 Models and personal recordings are not required.
 """
 import copy
@@ -14,11 +14,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(HERE / 'video_processing'))
 sys.path.insert(0, str(HERE))
-import pipeline_geometry as geometry
+from geometry3d import pipeline_geometry as geometry
 import pipeline
-import video_processor
+from processing import video_processor
 
 
 class DepthContracts(unittest.TestCase):

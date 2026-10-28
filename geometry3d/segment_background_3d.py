@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 import plotly.graph_objects as go
 from plotly.offline import get_plotlyjs
 import trimesh
+from project_paths import resolve_project_path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -204,6 +205,11 @@ def render_previews(out, stem, rgb, classes, world, stable):
 
 def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, source_scene,
                  *, allow_undistorted=False):
+    # process_scene is also called directly by the integrated pipeline, without
+    # the gallery CLI that normally creates this shared offline dependency.
+    javascript = out.parent / 'plotly.min.js'
+    if not javascript.is_file():
+        javascript.write_text(get_plotlyjs(), encoding='utf-8')
     source_width, source_height = source_scene['image_size']
     original_classes, _, _ = align_labels(source_scene, source_width, source_height,
                                          allow_undistorted=allow_undistorted)
@@ -329,7 +335,7 @@ def process_scene(path, depth_root, output_root, *, video_stem=None, allow_undis
     if not metadata_path.is_file():
         raise ValueError(f'No background depth estimate for {stem}')
     background_meta = json.loads(metadata_path.read_text())
-    run = REPO / background_meta['source_run']
+    run = resolve_project_path(background_meta['source_run'])
     scene = json.loads(path.read_text())
     depth = np.load(background_folder / 'background_depth.npy', allow_pickle=False)
     with np.load(background_folder / 'background_depth.npz', allow_pickle=False) as data:
@@ -488,15 +494,15 @@ def write_index(output, results):
         'These display transforms are not gravity calibration. Values are not measured metres.\n'
         'The 3D model is a labelled point cloud, not a watertight mesh or newly fitted room layout.\n'
         'Videos without corresponding scene JSONs are not assigned invented labels.\n\n'
-        'Reproduce: python video_processing/segment_background_3d.py --output OUTPUT_FOLDER\n'
-        'Install: pip install -r video_processing/requirements-background-depth.txt\n', encoding='utf-8')
+        'Reproduce: python -m geometry3d.segment_background_3d --output OUTPUT_FOLDER\n'
+        'Install: pip install -r geometry3d/requirements-background-depth.txt\n', encoding='utf-8')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scenes', type=Path, default=HERE / 'source')
-    parser.add_argument('--depth', type=Path, default=HERE / 'data/lingbot/background_depth')
-    parser.add_argument('--output', type=Path, default=HERE / 'data/lingbot/segmented_background')
+    parser.add_argument('--scenes', type=Path, default=REPO / 'source')
+    parser.add_argument('--depth', type=Path, default=REPO / 'data/lingbot/background_depth')
+    parser.add_argument('--output', type=Path, default=REPO / 'data/lingbot/segmented_background')
     args = parser.parse_args()
     scenes = sorted(args.scenes.resolve().glob('scene_*.json'))
     if not scenes:

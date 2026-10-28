@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+from project_paths import resolve_project_path
 
 
 def load(path):
@@ -51,7 +52,7 @@ def video_info(path):
 
 def records_from_manifest(path):
     """Accept Dino's path list or explicit {video, trajectory, scene, pose} records."""
-    path = Path(path).resolve()
+    path = resolve_project_path(Path(path).resolve())
     items = load(path)
     if not isinstance(items, list) or not items:
         raise ValueError('Processed-video manifest must contain a nonempty list')
@@ -63,7 +64,7 @@ def records_from_manifest(path):
         for key in ['video', 'trajectory', 'scene', 'pose', 'background']:
             if record.get(key):
                 p = Path(record[key])
-                record[key] = (path.parent / p).resolve() if not p.is_absolute() else p.resolve()
+                record[key] = resolve_project_path(p, base=path.parent)
         record.setdefault('trajectory', record['video'].with_suffix('.json'))
         record.setdefault('pose', record['trajectory'].with_name(record['trajectory'].stem + '_pose.json'))
         if not record['video'].is_file() or not record['trajectory'].is_file():
@@ -162,7 +163,7 @@ def adapt_trajectory(video, trajectory, output, keypoint_loader, pose=None):
 
 
 def select_depth_run(runs_root, info):
-    from background_depth import source_info
+    from .background_depth import source_info
     root = Path(runs_root)
     manifests = [root] if root.is_file() else sorted(root.rglob('processing_manifest.json'))
     for path in manifests:
@@ -210,7 +211,7 @@ def ensure_depth_run(video, info, runs_root, workspace, command_config=None):
     with (run / 'inference.log').open('w', encoding='utf-8') as log:
         try:
             if 'runtime' in config:
-                import lingbot_runtime
+                from . import lingbot_runtime
                 lingbot_runtime.run(config, config_path, video, run, log)
             else:
                 subprocess.run(argv, cwd=cwd, check=True, stdout=log, stderr=subprocess.STDOUT)
@@ -254,9 +255,7 @@ def ensure_depth_run(video, info, runs_root, workspace, command_config=None):
 
 
 def run_geometry(record, runs_root, command_config=None, assumed_width=.825):
-    import background_depth
-    import segment_background_3d
-    import door_distance_3d
+    from . import background_depth, segment_background_3d, door_distance_3d
     video = record['video']
     info = record['video_info']
     workspace = record['workspace'] / 'geometry_3d'

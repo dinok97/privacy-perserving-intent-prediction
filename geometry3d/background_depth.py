@@ -249,15 +249,15 @@ def write_index(output: Path, summaries: list[dict]):
         'No known physical distance was supplied; values are not validated metres.\n'
         'Coordinates refer to the resized prediction grid. Never sample heatmap colours as depth.\n'
         'An empty-scene reference or longer recordings can improve background visibility.\n\n'
-        'Reproduce: python video_processing/background_depth.py --output OUTPUT_FOLDER\n'
+        'Reproduce: python -m geometry3d.background_depth --output OUTPUT_FOLDER\n'
         'Dependencies: numpy, matplotlib, Pillow. Use --video STEM to process one clip.\n',
         encoding='utf-8')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input', type=Path, default=HERE / 'data/lingbot')
-    parser.add_argument('--output', type=Path, default=HERE / 'data/lingbot/background_depth')
+    parser.add_argument('--input', type=Path, default=REPO / 'data/lingbot')
+    parser.add_argument('--output', type=Path, default=REPO / 'data/lingbot/background_depth')
     parser.add_argument('--video', help='Only process this video stem')
     parser.add_argument('--relative-tolerance', type=float, default=0.10)
     parser.add_argument('--min-inlier-fraction', type=float, default=0.80)

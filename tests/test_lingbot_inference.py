@@ -14,9 +14,9 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import lingbot_inference as inference
-import lingbot_runtime as runtime
-import pipeline_geometry as geometry
+from geometry3d import lingbot_inference as inference
+from geometry3d import lingbot_runtime as runtime
+from geometry3d import pipeline_geometry as geometry
 
 
 def arrays(count=2, height=14, width=14):

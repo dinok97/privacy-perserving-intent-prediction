@@ -28,7 +28,10 @@ import sys
 import cv2
 import numpy as np
 
-from background_extraction import median_background
+if __package__:
+    from .background_extraction import median_background
+else:
+    from background_extraction import median_background
 
 # Videos to check, e.g. ["20250916_095917_id7_enter.mp4"]
 # (paths given on the command line are used instead when present)

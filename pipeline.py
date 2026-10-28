@@ -1,21 +1,21 @@
 """Video -> tracking -> segmentation -> 2D features, optionally extended with 3D.
 
 From the repository root:
-  python video_processing/video_processing/pipeline.py --source-dir INPUT --with-3d --lingbot-runs RUNS
-  python video_processing/video_processing/pipeline.py --processed-manifest CLIPS.json --with-3d --lingbot-runs RUNS
+  python pipeline.py --source-dir INPUT --with-3d --lingbot-runs RUNS
+  python pipeline.py --processed-manifest CLIPS.json --with-3d --lingbot-runs RUNS
 
 Processed manifests accept Dino's clip-path list or {video, trajectory, scene,
 pose, background} records. Paths are relative to the manifest. This mode reuses
 YOLO detections; no tracking model is loaded. Optional scene paths reuse SAM3.
 
 For missing depth, --lingbot-config accepts a local or ssh-docker runtime JSON
-(see lingbot_runtime.py). LingBot stays in its own checkout/environment. The
+(see geometry3d/lingbot_runtime.py). LingBot stays in its own checkout/environment. The
 legacy --lingbot-command-config alias also supports custom command argv/cwd.
 
 External 3D dependency: https://github.com/Robbyant/lingbot-map
 Clone/install LingBot in a separate Python environment following its upstream
 instructions, and download lingbot-map-long.pt. Neither is included by cloning
-this project. Copy video_processing/lingbot.local.example.json, replace its
+this project. Copy geometry3d/lingbot.local.example.json, replace its
 python/repo/checkpoint paths, and pass it with --with-3d --lingbot-config FILE.
 Cached depth exports can be used without installing LingBot.
 
@@ -37,10 +37,8 @@ from pathlib import Path
 import sys
 import time
 
-HERE = Path(__file__).resolve().parent
-PROJECT = HERE.parent
-sys.path.insert(0, str(PROJECT))
-import pipeline_geometry as geometry
+PROJECT = Path(__file__).resolve().parent
+from geometry3d import pipeline_geometry as geometry
 
 SOURCE_DIR = PROJECT / 'source'
 NOISY_LIBRARIES = ('PIL', 'matplotlib', 'urllib3', 'ultralytics', 'h5py', 'numba')
@@ -105,7 +103,7 @@ def log_summary(summary):
 # ----------------------------------------------------------------------------- stages
 
 def run_fisheye_corrector(source_dir):
-    import fisheye_correction
+    from processing import fisheye_correction
     videos = sorted(str(p) for p in Path(source_dir).iterdir()
                     if p.is_file() and p.suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.m4v'})
     if not videos:
@@ -118,7 +116,7 @@ def run_fisheye_corrector(source_dir):
 
 
 def run_trajectory_tracker(source_dir, output, manifest, device):
-    import video_processor
+    from processing import video_processor
     logger.info('Tracking videos from %s on device=%s', source_dir, device)
     result = video_processor.run(source_dir=source_dir, output_root=output,
                                  processed_manifest=manifest, device=device)
@@ -130,7 +128,7 @@ def run_trajectory_tracker(source_dir, output, manifest, device):
 
 def run_background_extractor_and_segmentation(records, fail_fast=False):
     """Prepare background + scene per record. Failing records get an 'error' key."""
-    import background_extraction
+    from processing import background_extraction
     pending = []
     for record in records:
         video, work = record['video'], record['workspace']
@@ -169,7 +167,7 @@ def run_background_extractor_and_segmentation(records, fail_fast=False):
             logger.exception('%s: background/scene preparation failed', video.name)
             mark_failed(record, 'background', error)
     if pending:
-        import background_segmentation
+        from processing import background_segmentation
         logger.info('Segmenting %d background image(s)', len(pending))
         background_segmentation.segment_images(pending)
         for record in records:
@@ -187,7 +185,7 @@ def run_background_extractor_and_segmentation(records, fail_fast=False):
 
 
 def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=None, assumed_width=.825):
-    import feature_extractor
+    from processing import feature_extractor
     name = record['video'].name
     trajectory = record['trajectory']
     if with_3d:
@@ -290,7 +288,7 @@ def run_pipeline(*, source_dir=SOURCE_DIR, output=PROJECT / 'data/pipeline', pro
         if not summary['clips']:
             raise RuntimeError('No clip was processed successfully; see the log for each clip')
 
-        import feature_extractor
+        from processing import feature_extractor
         catalog = list(feature_extractor.CATALOG)
         if with_3d:
             catalog.extend(geometry.catalog_entries())

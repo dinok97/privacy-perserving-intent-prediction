@@ -14,7 +14,10 @@ import numpy as np
 import fiftyone as fo
 import fiftyone.zoo as foz
 
-from background_extraction import median_background_over_a_video
+if __package__:
+    from .background_extraction import median_background_over_a_video
+else:
+    from background_extraction import median_background_over_a_video
 
 # Datasets that are already segmented: only opened, annotated and exported
 EXISTING_DATASETS = [] # <- everything filled here will be able to be changed (hand annotation) e.g. "20250916_095917_id7_enter", "20250916_095917_id93_enter"

@@ -1,6 +1,6 @@
 # data/
 
-Default output folder for `../video_processing/video_processor.py`. The
+Default output folder for `../processing/video_processor.py`. The
 recorder creates one dated folder per day and **appends** same-day sessions:
 
 ```
@@ -17,7 +17,7 @@ data/
 File names use the source video stem, with `_2`, `_3`, and later suffixes for
 multiple tracks from one source. Nothing is deleted —
 filtered clips are sorted into `removed/<reason>/`. See
-`../video_processing/README.md` for the JSON schema.
+`../processing/README.md` for the JSON schema.
 
 (This folder is intentionally kept in version control via this README; the
 recordings themselves are data, not code.)

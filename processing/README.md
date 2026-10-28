@@ -1,4 +1,4 @@
-# video_processing
+# 2D video processing
 
 `video_processor.py` processes pedestrian videos from `../source/` and writes a
 labelled, pose-enriched dataset into `../data/`. It is self-contained (only needs `ultralytics`, `opencv-python`, `numpy`)
@@ -24,10 +24,11 @@ Set the options in `main()` at the bottom of `video_processor.py`, then run
 it — press Run in your editor, or:
 
 ```bash
-python video_processor.py
+python -m processing.video_processor
 ```
 
-No command-line arguments are needed. The settings in `main()`:
+Run this command from the repository root. No command-line arguments are
+needed for the standalone collector. The settings in `run()`:
 
 - `save_clips=True` — record and save clips (default).
 - `save_clips=False` — track, label and show, but write nothing (monitor / setup;
