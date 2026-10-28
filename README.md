@@ -1,151 +1,187 @@
 # Privacy-preserving pedestrian intent prediction
 
-Extract pedestrian trajectories, pose, scene-relative motion features and
-optional 3D door distances from fixed-camera video. The main entry point is
-[`pipeline.py`](pipeline.py). Run these commands from the repository root.
+## 1. Project
 
-## Repository layout
+An automatic door should open for people who are about to **enter**, and stay
+shut for people who only **pass** by. Jesper Malmgren's master's
+thesis showed that this intent can be predicted from a person's pose
+and trajectory, using a single camera above one door.
 
-```text
-privacy-preserving-intent-prediction/
-  pipeline.py                 Main pipeline CLI and orchestration
-  project_paths.py            Project paths and older local metadata support
-  processing/                 Fisheye correction, tracking, segmentation, 2D features
-  geometry3d/                 LingBot adapters, depth, 3D segmentation and distances
-    README.md                 Complete 3D workflow and setup
-    lingbot.local.example.json Portable external-environment configuration
-  tests/                      Pipeline and geometry contract tests
-  source/                     Input videos, scene labels and recorder helper
-  videos/                     Local video collection (not committed)
-  data/                       Tracks, cached inference and generated outputs
-  docs/                       Local project references
-  reports/                    Local reports
-  requirements.txt            Main perception dependencies
-  check_env.py                Basic environment check
+This project extends that work so the prediction **generalises to new
+locations**: cameras mounted at different heights and angles, rooms with
+different lighting, and places with more or less traffic. To do that, the
+pipeline here turns raw videos into JSON files that describe:
+
+- **the person** – position, speed, heading, body orientation, gait;
+- **the scene** – floor, walls, windows, other doors and other ways out;
+- **how the two relate** – distance to walls, which exit the person is heading
+  for, how long until they reach the door.
+
+The aim is breadth: extract as many features as possible and document each one,
+so the supervisors and the later classification model can choose which to use.
+
+## 2. Table of contents
+
+1. [Project](#1-project)
+2. [Table of contents](#2-table-of-contents)
+3. [Structure](#3-structure)
+4. [Setup](#4-setup)
+   - [4.1 Clone the repository](#41-clone-the-repository)
+   - [4.2 General setup](#42-general-setup)
+   - [4.3 SAM 3 setup](#43-sam-3-setup)
+5. [Running](#5-running)
+   - [5.1 Running the whole pipeline](#51-running-the-whole-pipeline)
+   - [5.2 Running scripts separately](#52-running-scripts-separately)
+6. [Output](#6-output)
+7. [Known gaps](#7-known-gaps)
+8. [Credits and privacy](#8-credits-and-privacy)
+
+## 3. Structure
+
+```
+video_processing/
+  README.md                     this file
+  FEATURES.md                   every feature in the output JSON
+  requirements*.txt             Python dependencies (see Setup)
+  check_env.py                  checks that the main packages import
+  pipeline.py                   runs all steps below in order   (coming soon)
+  video_processing/             the pipeline steps, one script per step
+    README.md                   how to run each script on its own
+    fisheye_correction.py       1. fisheye corrector
+    video_processor.py          2. trajectory tracker
+    background_extraction.py    3. background extractor
+    background_segmentation.py  3. segmentation (batch, no GUI)
+    video_segmentation.py       3. segmentation (with hand correction)
+    extract_features_o.py       4. feature extractor
+  track_single_video.py         ┐
+  background_depth.py           │ 3D / depth steps (optional)
+  segment_background_3d.py      │
+  door_distance_3d.py           ┘
+  source/                       input videos go here (git-ignored)
+  data/                         all output is written here (git-ignored)
 ```
 
-The former outer `video_processing/` directory has been removed. The 2D stages
-are now in `processing/`; 3D code and its optional requirements are together in
-`geometry3d/`. Private recordings and model weights are not included in Git.
+### Pipeline
 
-## Setup
+Every step is its own script, so any step can later be re-run.
 
-Create a Python environment, then install the perception dependencies:
-
-```sh
-python -m pip install -r requirements.txt
-python check_env.py
+```
+video.mp4
+  │ 1. fisheye corrector         detect lens distortion, undistort the whole video
+  │    (fisheye_correction.py)
+  │ 2. trajectory tracker        track people, label enter / pass / exit
+  │    (video_processor.py)      → <clip>.json, <clip>_pose.json
+  │ 3. background extractor      per-pixel median → image of the empty room
+  │    + segmentation            SAM 3 → floor / wall / door / window polygons
+  │    (background_extraction.py, background_segmentation.py)
+  │                              → <clip>_background.png, <clip>_background.json
+  │ 4. feature extractor         combine person + scene → features per frame
+  │    (extract_features_o.py)
+  ▼
+features_<clip>.json
+  │ 5. (optional) depth + 3D scripts → distances in metres
 ```
 
-New tracking uses YOLO pose weights. New automatic scene segmentation uses
-SAM 3 and requires its weights and upstream model access. For the 3D extension,
-also install:
+## 4. Setup
 
-```sh
-python -m pip install -r geometry3d/requirements-background-depth.txt
+### 4.1 Clone the repository
+ 
+All code lives in the group's GitHub repository. Clone it and move into the
+`video_processing/` folder; every command below is run from there.
+ 
+```bash
+git clone https://github.com/dinok97/privacy-perserving-intent-prediction.git
+cd privacy-perserving-intent-prediction/video_processing
 ```
-
-New LingBot inference uses a **separate** checkout and Python environment for
-[Robbyant/lingbot-map](https://github.com/Robbyant/lingbot-map). See
-[`geometry3d/README.md`](geometry3d/README.md) for local/SSH Docker setup, cached
-depth, units, calibration assumptions and visual validation.
-
-## Run from raw videos
-
-```sh
-python pipeline.py --source-dir videos --output data/pipeline/run_2d --device cpu
+ 
+To get the latest changes later:
+ 
+```bash
+git pull
 ```
-
-The pipeline prepares lens-corrected inputs, tracks people, extracts a median
-RGB background, obtains scene segmentation and writes 2D features. The tracker
-can produce per-person clips rather than one output for an entire recording.
-Review its configured entrance region when changing camera placement. Add
-`--skip-undistort` to keep the supplied image geometry.
-
-## Reuse saved clips and trajectories
-
-Create an `inputs.json` manifest, with paths relative to that file:
-
-```json
-[
-  {
-    "video": "videos/clip.mp4",
-    "trajectory": "data/existing/clip_track1.json",
-    "pose": "data/existing/clip_track1_pose.json",
-    "scene": "source/scene_clip.json"
-  }
-]
+ 
+Videos, model weights and outputs are not in the repository (they are
+git-ignored), so after cloning you still need to add your own videos to
+`source/` and download the model weights (see below).
+ 
+### 4.2 General setup
+ 
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt                       # steps 1–5
+pip install -r requirements-background-depth.txt     # step 5 (3D), optional
+python3 check_env.py
 ```
-
-The video and trajectory are required. Pose, scene and RGB `background` paths
-can be supplied separately; otherwise the pipeline uses its sidecar conventions
-and generates missing scene inputs. Supplying saved tracks skips fisheye
-correction and YOLO. Supplying matching scene labels also avoids rerunning SAM 3.
-
-```sh
-python pipeline.py --processed-manifest inputs.json --output data/pipeline/run_2d
+ 
+For CPU-only Linux, install the CPU PyTorch wheels first if needed:
+ 
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
+ 
+Download `yolo11n-pose.pt` and place it in this folder (model weights are
+git-ignored).
+ 
+### 4.3 SAM 3 setup
 
-## Enable 3D features
+The background segmentation scripts use the `facebook/sam3` model through Hugging Face Transformers. 
 
-With matching cached LingBot predictions:
+### Prerequisites
 
-```sh
-python pipeline.py --processed-manifest inputs.json --output data/pipeline/run_3d --with-3d --lingbot-runs data/lingbot
-```
+The model is gated: user must request and receive access before the scripts can download its weights. What to do are:
 
-For missing predictions, copy
-[`geometry3d/lingbot.local.example.json`](geometry3d/lingbot.local.example.json)
-to a personal JSON, fill in the external environment/checkout/checkpoint paths,
-and pass `--lingbot-config data/lingbot.local.json`. This can also select an
-existing SSH/Docker installation. Cached depth takes precedence when it matches
-the exact video. 3D features supplement the existing 2D JSON fields.
+1. Sign in to Hugging Face or [create an account](https://huggingface.co/join).
+2. Open the [`facebook/sam3` model page](https://huggingface.co/facebook/sam3),
+   select **Agree and access repository** (or the equivalent access request
+   button), and review/accept the model's terms. Wait for access to be granted.
+   Approval is tied to your Hugging Face account; installing the Python package
+   alone does not grant access.
 
-See the [3D guide](geometry3d/README.md) for the full workflow. Reconstruction
-uses model units; metre values are estimates based on an assumed door width.
-Whole-clip scene calibration is not causal and needs an independent prior
-calibration before online intent-prediction evaluation.
+**Storage requirements**: The pretrained SAM 3 model requires approximately **6.9 GB** for the full set of model files. 
+Additional disk space is needed for Python dependencies, cached files, datasets, and segmentation outputs. Ensure sufficient free storage before the first run.
 
-## Outputs and logging
+### Steps
 
-Each run writes `pipeline_run.json`, `feature_catalog.json`, a timestamped log
-under `OUTPUT/logs/`, and per-clip workspaces containing feature JSON and any
-generated scene/3D outputs. Failed clips are recorded in `failed_clips`; other
-clips continue by default. Use `--fail-fast` to stop at the first error, and
-`--log-level DEBUG` for more console detail. Exit codes are 0 for complete,
-2 for complete with failed clips, and 1 for pipeline failure.
+1. Install all required dependency by run command `pip install -r requirements.txt`.
+2. Get Hugging Face access token. Read more [here](https://huggingface.co/docs/hub/main/en/security-tokens#how-to-manage-user-access-tokens).
+3. Authenticate Hugging Face by run command `hf auth login`. Then enter you Hugging
+Face access token when prompted. 
+4. Done. The model will be downloaded at the first time of running the pipeline. Note that the model
 
-For old local runs, manifest input paths and saved depth `source_run` paths
-under the removed outer folder are resolved to their new locations. Historical
-metadata and its checksums are preserved. Newly generated exports use the new
-layout. Update external scripts/bookmarks to the new entry points and folders.
+### Suggested system requirements
 
-## Updating an existing checkout
+- **Operating system**: Linux, Windows, or another environment supported by the required Python dependencies.
+- **Processing hardware**: A GPU is recommended for faster inference. CPU execution may be possible but significantly slower.
+- **RAM**: 16 GB is a reasonable starting point; 32 GB or more is preferable.
+- **Storage**: More than 10GB free storage available, since the `SAM3` model itself will take around 7GB of storage.
 
-Git relocates the tracked source files, not ignored local recordings or results.
-After switching to this layout, existing private assets may therefore remain
-under `video_processing/`. Move the contents of its `data/`, `videos/`, `source/`,
-`docs/` and `reports/` folders into the corresponding root folders. Merge folder
-contents without overwriting existing files; retain the new tracked READMEs.
-The old nested code folder is replaced by `processing/` and the root entry point,
-so it should not be copied back over the new code.
 
-The old outer folder remains ignored to keep any leftover private assets out of
-Git while each collaborator migrates their own files. Remove it once empty.
-Personal LingBot runtime configuration remains local; update its location in
-your command and any external shortcuts to the new layout.
+## 5. Running
 
-## More detail and tests
+### 5.1 Running the whole pipeline
 
-- [2D processing, recorder behaviour and JSON schema](processing/README.md)
-- [3D/LingBot pipeline and validation](geometry3d/README.md)
-- [Collected-data layout](data/README.md)
+***TODO***
 
-```sh
-python pipeline.py --help
-python -m unittest discover -s tests -v
-```
+### 5.2 Running scripts separately
 
-Recordings, annotated previews, pose tracks and reconstructions may contain
-identifying information. The current pipeline retains them for validation;
-it does not implement a production retention/deletion policy or prove anonymity.
+Each step can also be run on its own, e.g. to re-segment a scene without
+re-tracking. Commands, inputs and the files each script writes are listed in
+[video_processing/README.md](video_processing/README.md).
+
+## 6. Output
+
+***TODO***
+
+## 7. Known gaps
+
+- **TODO**
+
+## 8. Credits and privacy
+
+`video_processor.py` is based on
+[pose_data_collection.py](https://github.com/MirianaPassarotto/SeamAI/blob/main/automatic_door_project/intent_prediction_2026/data_collection_v2/data_collection/pose_data_collection.py)
+by Jesper Malmgren.
+
+Videos and pose data can identify people. `source/`, `data/`, videos and
+images are git-ignored — never commit recordings.
