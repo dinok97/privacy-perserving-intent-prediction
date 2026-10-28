@@ -1183,7 +1183,7 @@ def main():
         od = Path(a.out_dir) if a.out_dir else d
         for traj_p in sorted(d.glob("*.json")):
             s = traj_p.stem
-            if s.startswith("exits_") or s == "feature_catalog" \
+            if s.startswith(("exits_", "session_")) or s == "feature_catalog" \
                     or s.endswith(("_pose", "_background", "_features")):
                 continue
             scene_p = d / f"{s}_background.json"

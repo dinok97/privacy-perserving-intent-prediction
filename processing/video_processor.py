@@ -12,10 +12,10 @@ Each clip is processed to detect and track people, then produce 4 outputs:
   * a JSON file with the trajectory and some metadata;
   * a "<name>_pose.json" sidecar with the skeleton as normalized, named landmarks.
 
-Each finished clip is labelled enter / pass / exit and sorted into its folder.
-Clips that look unusable are not deleted, only moved into removed/<reason>/, so
-nothing is lost. Recordings made on the same day are appended into one dated
-folder.
+Each finished clip is labelled enter / pass / exit. All clips of one day go into
+one flat folder; the label and cleaning result are stored inside each clip's JSON
+and in clips.csv. Clips that look unusable are not deleted, only marked
+cleaning_result="removed", so nothing is lost.
 
 How to run
 ----------
@@ -34,9 +34,14 @@ How to run
 
 Output is written under ../data:
   data/2026-05-29/
-    enter/  pass/  exit/
-    removed/  ( too_short/  too_few_points/  partial_bottom/  corrupt/ )
-    _sessions/   one metadata file per recording session
+    <name>.mp4  <name>.json  <name>_pose.json     one set per clip
+    <name>.mp4.part                               clip still being written (or left by a crash)
+    clips.csv                                     one row per clip: label, cleaning result, files
+    session_<date>_<time>.json                    one metadata file per recording session
+
+Only clips with cleaning_result="keep" go into the processed manifest used by
+pipeline.py; removed clips stay on disk and in clips.csv. Set manual_label in
+clips.csv to correct a label by hand - it is kept when the same clip is reprocessed.
 
 Output clips and JSON files use the original source video filename stem. If a
 source video contains multiple tracked people, later clips receive _2, _3, ...
@@ -44,6 +49,7 @@ to avoid overwriting the first clip.
 """
 from __future__ import annotations
 
+import csv
 import datetime
 import hashlib
 import json
@@ -283,22 +289,30 @@ def classify_trajectory(frames: list[dict],
     return base_label, "keep", "accepted"
 
 
-REASON_TO_SUBDIR = {
-    "clip_shorter_than_min_duration": "too_short",
-    "too_few_valid_points": "too_few_points",
-    "partial_person_bottom_presence": "partial_bottom",
-    "mp4_unreadable_or_corrupt": "corrupt",
-}
+CLIPS_CSV_COLUMNS = ["clip_id", "label", "manual_label", "cleaning_result", "cleaning_reason",
+                     "session_id", "n_frames", "n_detected", "duration_s",
+                     "video", "trajectory", "pose"]
 
 
-def destination_dir(date_dir: Path, label: str, result: str, reason: str) -> Path:
-    """Folder a finished clip should be written to."""
-    if result == "keep":
-        return date_dir / label                       # enter/ or pass/
-    if result == "exit":
-        return date_dir / "exit"
-    sub = REASON_TO_SUBDIR.get(reason, "other")
-    return date_dir / "removed" / sub
+def update_clips_csv(path: Path, rows: list[dict]) -> None:
+    """Merge rows into clips.csv by clip_id. Rows of reprocessed clips are replaced,
+    but a manual_label set by hand is kept."""
+    existing: dict[str, dict] = {}
+    if path.is_file():
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                existing[row["clip_id"]] = row
+    for row in rows:
+        old = existing.get(row["clip_id"])
+        if old and old.get("manual_label"):
+            row["manual_label"] = old["manual_label"]
+        existing[row["clip_id"]] = row
+    tmp = path.with_name(path.name + ".part")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CLIPS_CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(existing.values())
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -429,17 +443,8 @@ class LivePoseCollector:
 
         root = Path(cfg.output_root)
         self.date_dir = root / self.date_str
-        self.temp_dir = self.date_dir / "_temp"
-        self.sessions_dir = self.date_dir / "_sessions"
         if cfg.save_clips:
-            for d in (self.temp_dir, self.sessions_dir,
-                      self.date_dir / "enter", self.date_dir / "pass",
-                      self.date_dir / "exit",
-                      self.date_dir / "removed" / "too_short",
-                      self.date_dir / "removed" / "too_few_points",
-                      self.date_dir / "removed" / "partial_bottom",
-                      self.date_dir / "removed" / "corrupt"):
-                d.mkdir(parents=True, exist_ok=True)
+            self.date_dir.mkdir(parents=True, exist_ok=True)
 
         # Calibration
         self.mtx = np.array(CAMERA_MTX)
@@ -472,7 +477,8 @@ class LivePoseCollector:
         self.current_source_stem = "source"
         self.source_clip_counts: dict[str, int] = {}
         self.seq = 0                        # clip counter for the whole session
-        self.processed_video_paths: list[str] = []
+        self.processed_video_paths: list[str] = []   # kept clips only -> pipeline manifest
+        self.clip_rows: list[dict] = []               # all clips -> clips.csv
         self.counts = {"enter": 0, "pass": 0, "exit": 0, "removed": 0}
         self.reason_counts: dict[str, int] = {}
 
@@ -557,8 +563,11 @@ class LivePoseCollector:
         cv2 = self.cv2
         self.source_clip_counts[self.current_source_stem] += 1
         source_occurrence = self.source_clip_counts[self.current_source_stem]
+        base = clip_basename(self.current_source_stem, source_occurrence)
         if self.cfg.save_clips:
-            temp_path = self.temp_dir / f"track_{track_id}_{int(t_clip0 * 1000)}.mp4"
+            # written as <name>.mp4.part and renamed when the clip is finished, so a
+            # crash never leaves a half-written file that looks like a real clip
+            temp_path = self.date_dir / f"{base}.mp4.part"
             writer = cv2.VideoWriter(
                 str(temp_path), cv2.VideoWriter_fourcc(*"mp4v"),
                 self.record_fps, (self.clean_width, self.clean_height))
@@ -575,6 +584,7 @@ class LivePoseCollector:
             "wall_start": datetime.datetime.now().isoformat(timespec="seconds"),
             "source_stem": self.current_source_stem,
             "source_occurrence": source_occurrence,
+            "base": base,
         }
         if self.cfg.debug:
             print(f"[START] id={track_id} -> {temp_path.name}")
@@ -659,21 +669,33 @@ class LivePoseCollector:
                 track_id=track_id, label=label, result=result, reason=reason,
                 fps=eff_fps, width=self.clean_width, height=self.clean_height,
                 door=self.door, axes=self.axes, frames=frames, meta=meta)
-            base = clip_basename(rec["source_stem"], rec["source_occurrence"])
-            dst = destination_dir(self.date_dir, label, result, reason)
-            dst.mkdir(parents=True, exist_ok=True)
+            base = rec["base"]
+            dst = self.date_dir
             with (dst / f"{base}.json").open("w", encoding="utf-8") as f:
                 json.dump(sample, f, indent=2)
-            if cfg.write_pose_sidecar and result == "keep" and n_kpts > 0:
+            # pose for every clip, so a removed clip that is restored by hand still has it
+            pose_name = None
+            if cfg.write_pose_sidecar and n_kpts > 0:
                 sidecar = build_pose_sidecar(
                     frames=frames, source_name=f"{base}.mp4", label=label,
                     fps=eff_fps, width=self.clean_width, height=self.clean_height)
-                with (dst / f"{base}_pose.json").open("w", encoding="utf-8") as f:
+                pose_name = f"{base}_pose.json"
+                with (dst / pose_name).open("w", encoding="utf-8") as f:
                     json.dump(sidecar, f)
+            video_name = None
             if rec["temp_path"] is not None and rec["temp_path"].exists():
                 saved_video_path = dst / f"{base}.mp4"
                 os.replace(rec["temp_path"], saved_video_path)
-                self.processed_video_paths.append(str(saved_video_path.resolve()))
+                video_name = saved_video_path.name
+                if result == "keep":          # removed clips never reach the pipeline
+                    self.processed_video_paths.append(str(saved_video_path.resolve()))
+            self.clip_rows.append({
+                "clip_id": base, "label": label, "manual_label": "",
+                "cleaning_result": result, "cleaning_reason": reason,
+                "session_id": meta["session_id"], "n_frames": len(frames),
+                "n_detected": sample["n_detected"], "duration_s": meta["duration_s"],
+                "video": video_name, "trajectory": f"{base}.json", "pose": pose_name,
+            })
 
         # Tally + one-line console update (printed only if print_labels).
         bucket = "removed" if result == "removed" else label
@@ -684,7 +706,7 @@ class LivePoseCollector:
             totals = f"enter={c['enter']} pass={c['pass']} exit={c['exit']} removed={c['removed']}"
             if result == "removed":
                 verb = "removed" if cfg.save_clips else "would remove"
-                print(f"[REMOVED:{REASON_TO_SUBDIR.get(reason, reason)}] id{track_id} "
+                print(f"[REMOVED:{reason}] id{track_id} "
                       f"({span:.1f}s) {verb}   so far: {totals}")
             else:
                 verb = "saved" if cfg.save_clips else "labeled"
@@ -964,6 +986,9 @@ class LivePoseCollector:
         if self.cfg.save_clips:
             self._write_session_metadata()
             self._write_processed_video_paths()
+            if self.clip_rows:
+                update_clips_csv(self.date_dir / "clips.csv", self.clip_rows)
+                print(f"[DONE] clip index: {self.date_dir / 'clips.csv'}")
         print(f"[DONE] session {self.sess_str}: {self.counts}  reasons={self.reason_counts}")
 
     def _write_session_metadata(self):
@@ -985,7 +1010,7 @@ class LivePoseCollector:
             "counts": self.counts,
             "reason_counts": self.reason_counts,
         }
-        path = self.sessions_dir / f"session_{self.date_str}_{self.sess_str}.json"
+        path = self.date_dir / f"session_{self.date_str}_{self.sess_str}.json"
         with path.open("w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         print(f"[DONE] session metadata: {path}")
@@ -1050,5 +1075,3 @@ def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu"
 
 if __name__ == "__main__":
     run()
-
-
