@@ -1,0 +1,38 @@
+# Private recordings and generated outputs; retain the data-layout guide.
+/data/*
+!/data/README.md
+/videos/
+/reports/
+/tmp/
+/bak/
+# Existing checkouts may still contain private assets under the old layout.
+/video_processing/
+/source/*.png
+/source/*.jpg
+/source/*.jpeg
+/source/**/*.json
+/source/*.json
+
+# Recordings and model weights anywhere in the repository.
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.m4v
+*.pt
+*.onnx
+*.engine
+*.task
+
+# Local reference documents and compiled report artefacts.
+*.pdf
+*.log
+*.aux
+*.synctex.gz
+
+# Python environments and caches; source packages remain visible to Git.
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+__MACOSX/

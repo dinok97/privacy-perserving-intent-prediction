@@ -1,4 +1,4 @@
 For future user
 ##################################################################################
 
-See README.md here and in video_processing/ for the details and the JSON schema.
+See ../README.md and ../processing/README.md for the details and JSON schema.

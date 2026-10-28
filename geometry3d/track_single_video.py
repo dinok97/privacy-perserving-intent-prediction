@@ -18,8 +18,9 @@ import torch
 import ultralytics
 from ultralytics import YOLO
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / 'video_processing'))
-from video_processor import LivePoseCollector, build_pose_sidecar, build_sample_json
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from processing.video_processor import LivePoseCollector, build_pose_sidecar, build_sample_json
 
 
 def sha256(path):
@@ -97,7 +98,7 @@ def main():
                      'ultralytics': ultralytics.__version__, 'opencv': cv2.__version__},
         'runtime_seconds': time.perf_counter() - started,
         'script_sha256': sha256(__file__),
-        'reused_detection_and_json_helpers_sha256': sha256(Path(__file__).parent / 'video_processing/video_processor.py'),
+        'reused_detection_and_json_helpers_sha256': sha256(Path(__file__).resolve().parents[1] / 'processing/video_processor.py'),
     }
     # Full original timeline per track, including explicitly missing frames.
     for tid in sorted(seen_ids):

@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 import plotly.graph_objects as go
 from plotly.offline import get_plotlyjs
 import trimesh
+from project_paths import resolve_project_path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -29,8 +30,11 @@ COLOURS = np.array([[140, 148, 158], [75, 166, 235], [235, 183, 59],
 
 
 def digest(path):
+    result = hashlib.sha256()
     with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            result.update(chunk)
+    return result.hexdigest()
 
 
 def polygon_mask(obj, width, height):
@@ -42,9 +46,9 @@ def polygon_mask(obj, width, height):
     return np.asarray(image, dtype=bool)
 
 
-def align_labels(scene, width, height):
+def align_labels(scene, width, height, *, allow_undistorted=False):
     source_width, source_height = scene['image_size']
-    if '_undistorted' in scene['image']:
+    if '_undistorted' in scene['image'] and not allow_undistorted:
         raise ValueError('Undistorted polygons require a lens remapping, not only resizing.')
     original_classes = np.zeros((source_height, source_width), dtype=np.uint8)
     original_instances = np.zeros((source_height, source_width), dtype=np.int32)
@@ -199,9 +203,16 @@ def render_previews(out, stem, rgb, classes, world, stable):
     plt.close(fig)
 
 
-def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, source_scene):
+def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, source_scene,
+                 *, allow_undistorted=False):
+    # process_scene is also called directly by the integrated pipeline, without
+    # the gallery CLI that normally creates this shared offline dependency.
+    javascript = out.parent / 'plotly.min.js'
+    if not javascript.is_file():
+        javascript.write_text(get_plotlyjs(), encoding='utf-8')
     source_width, source_height = source_scene['image_size']
-    original_classes, _, _ = align_labels(source_scene, source_width, source_height)
+    original_classes, _, _ = align_labels(source_scene, source_width, source_height,
+                                         allow_undistorted=allow_undistorted)
     Image.fromarray(COLOURS[original_classes]).save(out / 'original_2d_segmentation.png')
     y, x = np.indices(classes.shape)
     sampling = (x % 2 == 0) & (y % 2 == 0)
@@ -317,14 +328,14 @@ document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener
     return int(keep.sum())
 
 
-def process_scene(path, depth_root, output_root):
-    stem = path.stem.removeprefix('scene_')
+def process_scene(path, depth_root, output_root, *, video_stem=None, allow_undistorted=False):
+    stem = video_stem or path.stem.removeprefix('scene_')
     background_folder = depth_root / stem
     metadata_path = background_folder / 'metadata.json'
     if not metadata_path.is_file():
         raise ValueError(f'No background depth estimate for {stem}')
     background_meta = json.loads(metadata_path.read_text())
-    run = REPO / background_meta['source_run']
+    run = resolve_project_path(background_meta['source_run'])
     scene = json.loads(path.read_text())
     depth = np.load(background_folder / 'background_depth.npy', allow_pickle=False)
     with np.load(background_folder / 'background_depth.npz', allow_pickle=False) as data:
@@ -335,7 +346,7 @@ def process_scene(path, depth_root, output_root):
     expected_height = round(source_height * (518 / source_width) / 14) * 14
     if (width, height) != (518, min(518, expected_height)) or expected_height > 518:
         raise ValueError('This scene requires preprocessing other than the verified uncropped resize.')
-    classes, instances, aligned = align_labels(scene, width, height)
+    classes, instances, aligned = align_labels(scene, width, height, allow_undistorted=allow_undistorted)
     intrinsics = []
     files = sorted((run / stem).glob('frame_*.npz'))
     for frame in files:
@@ -375,7 +386,8 @@ def process_scene(path, depth_root, output_root):
     cloud_scene.apply_transform(glb_transform)
     cloud_scene.export(out / 'segmented_background.glb')
     render_previews(out, stem, rgb, classes, world, keep)
-    viewer_points = write_viewer(out, stem, world, rgb, classes, instances, keep, depth, scene)
+    viewer_points = write_viewer(out, stem, world, rgb, classes, instances, keep, depth, scene,
+                                  allow_undistorted=allow_undistorted)
 
     # Independently reload both 3D exports and verify all points survived export.
     glb = trimesh.load(out / 'segmented_background.glb', force='scene', process=False)
@@ -391,7 +403,7 @@ def process_scene(path, depth_root, output_root):
                          'exported_3d_points': int((ids == i).sum())}
               for i in range(len(NAMES))}
     result = {
-        'video': stem + '.mp4', 'segmentation_source': path.relative_to(REPO).as_posix(),
+        'video': background_meta['video'], 'segmentation_source': path.resolve().as_posix(),
         'source_video_sha256': background_meta['source_video_sha256'],
         'segmentation_sha256': digest(path), 'background_depth_sha256': digest(background_folder / 'background_depth.npy'),
         'source_image_size': [source_width, source_height], 'matched_image_size': [width, height],
@@ -482,15 +494,15 @@ def write_index(output, results):
         'These display transforms are not gravity calibration. Values are not measured metres.\n'
         'The 3D model is a labelled point cloud, not a watertight mesh or newly fitted room layout.\n'
         'Videos without corresponding scene JSONs are not assigned invented labels.\n\n'
-        'Reproduce: python video_processing/segment_background_3d.py --output OUTPUT_FOLDER\n'
-        'Install: pip install -r video_processing/requirements-background-depth.txt\n', encoding='utf-8')
+        'Reproduce: python -m geometry3d.segment_background_3d --output OUTPUT_FOLDER\n'
+        'Install: pip install -r geometry3d/requirements-background-depth.txt\n', encoding='utf-8')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scenes', type=Path, default=HERE / 'source')
-    parser.add_argument('--depth', type=Path, default=HERE / 'data/lingbot/background_depth')
-    parser.add_argument('--output', type=Path, default=HERE / 'data/lingbot/segmented_background')
+    parser.add_argument('--scenes', type=Path, default=REPO / 'source')
+    parser.add_argument('--depth', type=Path, default=REPO / 'data/lingbot/background_depth')
+    parser.add_argument('--output', type=Path, default=REPO / 'data/lingbot/segmented_background')
     args = parser.parse_args()
     scenes = sorted(args.scenes.resolve().glob('scene_*.json'))
     if not scenes:

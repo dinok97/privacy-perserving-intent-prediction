@@ -1,0 +1,12 @@
+{
+  "upstream_repository": "https://github.com/Robbyant/lingbot-map",
+  "runtime": "local",
+  "python": "REPLACE_WITH_ABSOLUTE_PATH_TO_LINGBOT_ENV_PYTHON",
+  "repo": "REPLACE_WITH_ABSOLUTE_PATH_TO_LINGBOT_MAP_CHECKOUT",
+  "checkpoint": "REPLACE_WITH_ABSOLUTE_PATH_TO_LINGBOT_MAP_LONG_PT",
+  "device": "cuda",
+  "dtype": "auto",
+  "scale_frames": 8,
+  "cache_window": 64,
+  "keyframe_interval": 1
+}

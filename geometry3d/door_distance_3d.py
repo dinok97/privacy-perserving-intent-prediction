@@ -199,10 +199,11 @@ def contact(det, width, height):
     x1, y1, x2, y2 = det['bbox']
     if y2 >= height - 3:
         return None, 'feet_cropped_or_unobserved_at_bottom', None
-    return np.array([(x1 + x2) / 2, y2]), 'bbox_bottom_proxy', float(det['confidence'])
+    confidence = det.get('confidence')
+    return np.array([(x1 + x2) / 2, y2]), 'bbox_bottom_proxy', float(confidence) if confidence is not None else None
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--background', type=Path, required=True)
     parser.add_argument('--tracking', type=Path, required=True)
@@ -213,15 +214,15 @@ def main():
                         help='Original background-depth metadata.json for older segmentation exports without a source hash')
     parser.add_argument('--door-width-m', type=float, default=.825,
                         help='Assumed physical door-leaf width for estimated metres (default: M9, 0.825 m)')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     tracking = json.loads((args.tracking / 'detections.json').read_text())
     meta = tracking['metadata']
     sw, sh = meta['frame_width'], meta['frame_height']
     bgmeta = json.loads((args.background / 'metadata.json').read_text())
-    assert meta['source_video'] == bgmeta['video']
-    video = args.video or HERE / 'videos' / meta['source_video']
+    # Filenames can differ after an identical file is copied/renamed; byte hashes below are authoritative.
+    video = args.video or REPO / 'videos' / meta['source_video']
     if sha(video) != meta['source_video_sha256']:
         raise ValueError('Original video hash does not match the saved YOLO detections')
     background_video_hash = bgmeta.get('source_video_sha256')
@@ -399,12 +400,13 @@ def main():
         'No temporal smoothing, interpolation, automatic relabelling or event-time estimate is applied.\n\n'
         + '\n'.join(limitations) + '\n\n'
         'Geometry can be regenerated from the saved detections, without rerunning YOLO:\n'
-        'python video_processing/door_distance_3d.py --background BACKGROUND_FOLDER '
+        'python -m geometry3d.door_distance_3d --background BACKGROUND_FOLDER '
         '--tracking TRACKING_FOLDER --output OUTPUT_FOLDER\n', encoding='utf-8')
     summary['output_sha256'] = {p.relative_to(out).as_posix(): sha(p) for p in sorted(out.rglob('*'))
                                 if p.is_file() and p.name != 'summary.json'}
     dump(out / 'summary.json', summary)
     print(json.dumps(summary, indent=2), flush=True)
+    return summary
 
 
 def export_csv(out, rows, doors, calibration):

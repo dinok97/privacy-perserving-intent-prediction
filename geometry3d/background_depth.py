@@ -23,8 +23,11 @@ REPO = HERE.parent
 
 
 def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def source_info(manifest: dict) -> dict:
@@ -161,7 +164,7 @@ def process_run(manifest_path: Path, output_root: Path, args) -> dict:
 
     summary = {
         'video': source['name'], 'source_video_sha256': source.get('sha256'),
-        'source_run': manifest_path.parent.relative_to(REPO).as_posix(),
+        'source_run': manifest_path.parent.resolve().as_posix(),
         'source_manifest_sha256': sha256(manifest_path),
         'frames_used': count, 'prediction_width': median.shape[1],
         'prediction_height': median.shape[0], 'depth_dtype': str(median.dtype),
@@ -246,15 +249,15 @@ def write_index(output: Path, summaries: list[dict]):
         'No known physical distance was supplied; values are not validated metres.\n'
         'Coordinates refer to the resized prediction grid. Never sample heatmap colours as depth.\n'
         'An empty-scene reference or longer recordings can improve background visibility.\n\n'
-        'Reproduce: python video_processing/background_depth.py --output OUTPUT_FOLDER\n'
+        'Reproduce: python -m geometry3d.background_depth --output OUTPUT_FOLDER\n'
         'Dependencies: numpy, matplotlib, Pillow. Use --video STEM to process one clip.\n',
         encoding='utf-8')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input', type=Path, default=HERE / 'data/lingbot')
-    parser.add_argument('--output', type=Path, default=HERE / 'data/lingbot/background_depth')
+    parser.add_argument('--input', type=Path, default=REPO / 'data/lingbot')
+    parser.add_argument('--output', type=Path, default=REPO / 'data/lingbot/background_depth')
     parser.add_argument('--video', help='Only process this video stem')
     parser.add_argument('--relative-tolerance', type=float, default=0.10)
     parser.add_argument('--min-inlier-fraction', type=float, default=0.80)
