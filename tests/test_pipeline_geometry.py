@@ -80,6 +80,25 @@ class DepthContracts(unittest.TestCase):
         self.assertFalse((self.root / 'work/lingbot_run/processing_manifest.json').exists())
 
 
+class PipelineCleanupContracts(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_removes_temporary_undistorted_results_directory(self):
+        temporary_results = self.root / '[TEMP]_undistorted_results'
+        temporary_results.mkdir()
+        (temporary_results / 'clip.mp4').touch()
+
+        pipeline.delete_undistorted_results(self.root)
+
+        self.assertFalse(temporary_results.exists())
+
+    def test_missing_temporary_undistorted_results_directory_is_ok(self):
+        pipeline.delete_undistorted_results(self.root)
+
+
 class JoinContracts(unittest.TestCase):
     def setUp(self):
         def row(i, valid):

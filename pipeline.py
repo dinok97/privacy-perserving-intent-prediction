@@ -408,11 +408,43 @@ def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=
     return result
 
 
+def delete_debug_files(records):
+    """Remove temporary background and feature-debug files for each clip."""
+    for record in records:
+        video_path = Path(record['video'])
+        video_filename = video_path.stem
+        workspace = Path(record['workspace'])
+        filenames = (
+            f'{video_filename}_background.json',
+            f'{video_filename}_background_overlay.png',
+            f'{video_filename}_background.png',
+            f'features_{video_filename}_debug.png',
+        )
+        for filename in filenames:
+            (workspace / filename).unlink(missing_ok=True)
+
+
+def delete_undistorted_results(source_dir):
+    """Remove the temporary undistorted-video directory created during correction."""
+    undistorted_results = Path(source_dir) / '[TEMP]_undistorted_results'
+    if undistorted_results.exists():
+        shutil.rmtree(undistorted_results)
+
+
 # ----------------------------------------------------------------------------- orchestration
 
-def run_pipeline(*, source_dir=SOURCE_DIR, output=PROJECT / 'data/pipeline', processed_manifest=None,
-                 with_3d=False, lingbot_runs=PROJECT / 'data/lingbot', lingbot_command_config=None,
-                 assumed_width=.825, skip_undistort=False, device='cpu', fail_fast=False, log_file=None):
+def run_pipeline(*, source_dir=SOURCE_DIR, 
+                 output=PROJECT / 'data/pipeline', 
+                 processed_manifest=None,
+                 with_3d=False, 
+                 lingbot_runs=PROJECT / 'data/lingbot', 
+                 lingbot_command_config=None,
+                 assumed_width=.825, 
+                 skip_undistort=False, 
+                 device='cpu', 
+                 fail_fast=False, 
+                 log_file=None,
+                 debug=False):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     source_dir = Path(source_dir).resolve()
@@ -493,6 +525,11 @@ def run_pipeline(*, source_dir=SOURCE_DIR, output=PROJECT / 'data/pipeline', pro
             catalog.extend(geometry.catalog_entries())
         geometry.save(output / 'feature_catalog.json', {'schema_version': feature_extractor.SCHEMA_VERSION,
             'extensions': {'geometry_3d': '1.0'} if with_3d else {}, 'features': catalog})
+        
+        if not debug:
+            delete_debug_files(records=records)
+            delete_undistorted_results(source_dir)
+        
         logger.info('Feature catalog - %d feature(s) written', len(catalog))
         summary['status'] = 'complete_with_errors' if summary['failed_clips'] else 'complete'
     except Exception as error:
@@ -523,17 +560,30 @@ def main():
     parser.add_argument('--fail-fast', action='store_true', help='Stop at the first failing clip instead of skipping it')
     parser.add_argument('--show-output', action='store_true',
                         help='Also print the raw output of the submodules (YOLO, SAM3, undistort) to the console')
+    parser.add_argument('--debug', action='store_true',
+                        help='Keep supporting files, including temporary undistorted videos, in addition to extracted features')
     args = parser.parse_args()
+    
     CAPTURE_OUTPUT = not args.show_output
     log_file = setup_logging(args.output.resolve() / 'logs')
     if args.show_output:
         CONSOLE.live = False  # raw prints would land in the middle of the in-place line
     logger.debug('Log file: %s', log_file)
     try:
-        result = run_pipeline(source_dir=args.source_dir, output=args.output, processed_manifest=args.processed_manifest,
-            with_3d=args.with_3d, lingbot_runs=args.lingbot_runs, lingbot_command_config=args.lingbot_command_config,
-            assumed_width=args.door_width_m, skip_undistort=args.skip_undistort, device=args.device,
-            fail_fast=args.fail_fast, log_file=log_file)
+        result = run_pipeline(
+                source_dir=args.source_dir, 
+                output=args.output, 
+                processed_manifest=args.processed_manifest,
+                with_3d=args.with_3d, 
+                lingbot_runs=args.lingbot_runs, 
+                lingbot_command_config=args.lingbot_command_config,
+                assumed_width=args.door_width_m, 
+                skip_undistort=args.skip_undistort, 
+                device=args.device,
+                fail_fast=args.fail_fast, 
+                log_file=log_file,
+                debug=args.debug,
+            )
     except Exception:
         sys.exit(1)  # already logged with traceback
     sys.exit(2 if result['failed_clips'] else 0)
