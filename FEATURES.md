@@ -12,12 +12,13 @@
    - [4.4 Pose (`pose`)](#44-pose-pose)
    - [4.5 Person × scene (`scene_rel`)](#45-person--scene-scene_rel)
    - [4.6 Track summary](#46-track-summary)
+   - [4.7 3D extension (`geometry_3d`, optional)](#47-3d-extension-geometry_3d-optional)
 5. [Parameters](#5-parameters)
 
 ## 1. What this file describes
 
-The content of **`features_<clip>.json`** (schema `feat-0.3`), the final output
-of the pipeline. It is produced by `extract_features_o.py` from three inputs:
+The content of **`<clip>_features.json`** (schema `feat-0.3`), the final output
+of the pipeline. It is produced by `processing/feature_extractor.py` from three inputs:
 
 - the trajectory `<clip>.json` (where the person is, per frame),
 - the pose sidecar `<clip>_pose.json` (body keypoints),
@@ -46,7 +47,9 @@ causal. Use it to select features programmatically.
     "sources",          // which input files were used
     "segmentation",     // labels present in the scene
     "trajectory_meta",  // session, fps, tracker, git commit
-    "frame_size", "params", "units", "notes"
+    "frame_size", "params", "units", "notes",
+    "clip_video", "clip_video_sha256",   // added by pipeline.py
+    "depth"             // null, or 3D calibration info with --with-3d
   },
   "data": {
     "scene_summary": { ... },                         // 4.1 – once per clip
@@ -56,7 +59,8 @@ causal. Use it to select features programmatically.
         "pos": {...},        // 4.2
         "kin": {...},        // 4.3
         "pose": {...},       // 4.4
-        "scene_rel": {...}   // 4.5
+        "scene_rel": {...},  // 4.5
+        "geometry_3d": {...} // 4.7 – only with --with-3d
       }
     ]
   }
@@ -75,12 +79,15 @@ So there are three automatic types:
 
 | type | found from | example |
 |---|---|---|
-| `door` | door polygon; its threshold is where the outline touches the floor | a side door in the room |
-| `edge` | a gap in the frame border that the floor reaches and no wall/window blocks | a corridor running out of the image |
-| `floor_tip` | a part of the floor that sticks out and is cut off by a wall | the floor turning round a corner |
+| `door` | door polygon; the exit line is the straight part of its outline that touches the floor, else its bottom edge | a side door in the room |
+| `edge` | a stretch of the frame border that the floor touches (a door at the same stretch wins) | a corridor running out of the image |
+| `floor_tip` | a floor dead end with wall, window or door on **both** sides | the floor turning round a corner |
 
-- `status`: `detected` (door polygon), `inferred` (edge / floor tip) or
-  `manual` (from `exits_<clip>.json`, which replaces the automatic exits).
+- `status`: `detected` (door with floor contact, edge), `no_floor_contact`
+  (door whose bottom edge is used instead), `inferred` (floor tip) or `manual`
+  (from `exits_<clip>.json`, which replaces the automatic exits).
+- A floor tip next to something unlabelled (a plant, a chair) is **not** an
+  exit: the unknown object may block the way.
 - The **target** — `door_center` in the trajectory JSON, the door the camera
   controls — is never an exit.
 - Exit indices are only valid **within one file**; there are no stable IDs
@@ -97,8 +104,8 @@ So there are three automatic types:
 | field | meaning |
 |---|---|
 | `target.*` | target centre, threshold segment, whether its door polygon is visible |
-| `exits[]` | every exit: type, edge, anchor, segment, width, status, direction |
-| `counts.*` | `n_exits`, `n_door`, `n_edge`, `n_floor_tip`, `n_manual` |
+| `exits[]` | every exit: type, edge, anchor, segment, width, status, direction; `threshold_src` (doors), `flanked_by` (floor tips) |
+| `counts.*` | `n_exits`, `n_door`, `n_edge`, `n_floor_tip`, `n_manual`, `n_door_no_floor_contact` |
 | `areas.*` | share of the image that is floor / wall / window / door / unlabelled |
 | `floor_top_y_px` | highest floor row — proxy for camera tilt |
 | `brightness_mean`, `brightness_contrast` | lighting of the background (0–1) |
@@ -177,9 +184,21 @@ straightness, mean/max speed, last position, and `camera_geom` — a linear fit 
 bbox height vs. ground y whose zero crossing estimates the horizon (a proxy for
 the unknown camera tilt).
 
+### 4.7 3D extension (`geometry_3d`, optional)
+
+Only present when the pipeline runs with `--with-3d`. Each frame then gets a
+`geometry_3d` block with the person's position on the fitted floor, the distance
+to each door and how fast that distance shrinks (negative = approaching), both
+in model units and in estimated metres.
+
+These values use the whole clip to estimate the scene, so they are **not
+causal** (`causal: false` in the catalog). Door keys here are separate from the
+2D exit indices. Details: [geometry3d/README.md](geometry3d/README.md#combined-feature-format).
+
 ## 5. Parameters
 
-All thresholds are in `PARAMS` at the top of `extract_features_o.py` (e.g.
-`min_gap_px` for the narrowest edge exit, `n_competitors`, `smooth_window`).
-They are copied into `info.params` of every output, so each file records how it
-was made.
+All thresholds are in `PARAMS` at the top of `processing/feature_extractor.py`
+(e.g. `min_gap_px` for the narrowest edge exit, `n_competitors`,
+`smooth_window`). Pixel thresholds are tuned for a 640 px wide frame and scale
+with the resolution. They are copied into `info.params` of every output, so each
+file records how it was made.
