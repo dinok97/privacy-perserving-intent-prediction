@@ -3,185 +3,215 @@
 ## 1. Project
 
 An automatic door should open for people who are about to **enter**, and stay
-shut for people who only **pass** by. Jesper Malmgren's master's
-thesis showed that this intent can be predicted from a person's pose
-and trajectory, using a single camera above one door.
+shut for people who only **pass** by or **exit**. Jesper Malmgren's master's
+thesis showed this intent can be predicted from a person's pose and trajectory,
+seen by one camera above the door.
 
-This project extends that work so the prediction **generalises to new
-locations**: cameras mounted at different heights and angles, rooms with
-different lighting, and places with more or less traffic. To do that, the
-pipeline here turns raw videos into JSON files that describe:
+This project makes that work **generalise to new locations**: other camera
+heights and angles, other lighting, more or less traffic. The pipeline turns
+raw videos into JSON features that describe:
 
 - **the person** – position, speed, heading, body orientation, gait;
 - **the scene** – floor, walls, windows, other doors and other ways out;
 - **how the two relate** – distance to walls, which exit the person is heading
-  for, how long until they reach the door.
+  for, time until they reach the door.
 
-The aim is breadth: extract as many features as possible and document each one,
-so the supervisors and the later classification model can choose which to use.
+The goal is breadth: extract as many documented features as possible, so the
+supervisors and the later classifier can choose which ones to use.
 
-## 2. Table of contents
+## 2. Contents
 
 1. [Project](#1-project)
-2. [Table of contents](#2-table-of-contents)
+2. [Contents](#2-contents)
 3. [Structure](#3-structure)
 4. [Setup](#4-setup)
-   - [4.1 Clone the repository](#41-clone-the-repository)
-   - [4.2 General setup](#42-general-setup)
-   - [4.3 SAM 3 setup](#43-sam-3-setup)
 5. [Running](#5-running)
-   - [5.1 Running the whole pipeline](#51-running-the-whole-pipeline)
-   - [5.2 Running scripts separately](#52-running-scripts-separately)
 6. [Output](#6-output)
-7. [Known gaps](#7-known-gaps)
+7. [More details and tests](#7-more-details-and-tests)
 8. [Credits and privacy](#8-credits-and-privacy)
 
 ## 3. Structure
 
 ```
-video_processing/
-  README.md                     this file
-  FEATURES.md                   every feature in the output JSON
-  requirements*.txt             Python dependencies (see Setup)
-  check_env.py                  checks that the main packages import
-  pipeline.py                   runs all steps below in order   (coming soon)
-  video_processing/             the pipeline steps, one script per step
-    README.md                   how to run each script on its own
-    fisheye_correction.py       1. fisheye corrector
-    video_processor.py          2. trajectory tracker
-    background_extraction.py    3. background extractor
-    background_segmentation.py  3. segmentation (batch, no GUI)
-    video_segmentation.py       3. segmentation (with hand correction)
-    extract_features_o.py       4. feature extractor
-  track_single_video.py         ┐
-  background_depth.py           │ 3D / depth steps (optional)
-  segment_background_3d.py      │
-  door_distance_3d.py           ┘
-  source/                       input videos go here (git-ignored)
-  data/                         all output is written here (git-ignored)
+privacy-perserving-intent-prediction/
+  pipeline.py          main entry point: runs all steps below
+  FEATURES.md          every feature in the output JSON
+  processing/          the 2D steps, one script each      → processing/README.md
+  geometry3d/          optional 3D step (depth, distances) → geometry3d/README.md
+  source/              input videos + a simple recorder    → source/README.md
+  data/                all output (git-ignored)            → data/README.md
+  tests/               pipeline and geometry tests
+  project_paths.py     path helpers, keeps old local runs working
+  requirements.txt     Python dependencies
+  check_env.py         checks that the main packages import
 ```
 
 ### Pipeline
 
-Every step is its own script, so any step can later be re-run.
-
 ```
-video.mp4
-  │ 1. fisheye corrector         detect lens distortion, undistort the whole video
-  │    (fisheye_correction.py)
-  │ 2. trajectory tracker        track people, label enter / pass / exit
-  │    (video_processor.py)      → <clip>.json, <clip>_pose.json
-  │ 3. background extractor      per-pixel median → image of the empty room
-  │    + segmentation            SAM 3 → floor / wall / door / window polygons
-  │    (background_extraction.py, background_segmentation.py)
-  │                              → <clip>_background.png, <clip>_background.json
-  │ 4. feature extractor         combine person + scene → features per frame
-  │    (extract_features_o.py)
+video
+  │ 1. fisheye correction      undistort the video if the lens bends straight lines
+  │ 2. trajectory tracking     YOLO pose → one clip per person, labelled enter / pass / exit
+  │ 3. background extraction   image of the empty room, people masked out
+  │ 4. segmentation            SAM 3 → floor / wall / door / window polygons
+  │ 5. feature extraction      person + scene → features per frame
   ▼
-features_<clip>.json
-  │ 5. (optional) depth + 3D scripts → distances in metres
+<clip>_features.json
+  │ 6. (optional) 3D           depth → distances to doors in estimated metres
 ```
+
+The video is undistorted **first**, so the person's trajectory and the scene
+are in the same geometry. What each script does is in
+[processing/README.md](processing/README.md).
 
 ## 4. Setup
 
 ### 4.1 Clone the repository
- 
-All code lives in the group's GitHub repository. Clone it and move into the
-`video_processing/` folder; every command below is run from there.
- 
+
 ```bash
 git clone https://github.com/dinok97/privacy-perserving-intent-prediction.git
-cd privacy-perserving-intent-prediction/video_processing
+cd privacy-perserving-intent-prediction
 ```
- 
-To get the latest changes later:
- 
-```bash
-git pull
-```
- 
-Videos, model weights and outputs are not in the repository (they are
-git-ignored), so after cloning you still need to add your own videos to
-`source/` and download the model weights (see below).
- 
-### 4.2 General setup
- 
+
+All commands in this README are run from this folder. Get updates later with
+`git pull`. Videos, model weights and outputs are not in the repository.
+
+### 4.2 Python environment
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt                       # steps 1–5
-pip install -r requirements-background-depth.txt     # step 5 (3D), optional
+pip install -r requirements.txt
 python3 check_env.py
 ```
- 
-For CPU-only Linux, install the CPU PyTorch wheels first if needed:
- 
+
+- CPU-only Linux: install the CPU PyTorch wheels first,
+  `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`.
+- The YOLO pose model (`yolo11n-pose.pt`) is downloaded into this folder
+  automatically on the first run.
+
+### 4.3 SAM 3
+
+Segmentation uses the gated `facebook/sam3` model from Hugging Face.
+
+1. Sign in to Hugging Face (or [create an account](https://huggingface.co/join)).
+2. On the [`facebook/sam3` model page](https://huggingface.co/facebook/sam3),
+   select **Agree and access repository** and wait for access to be granted.
+   Access is tied to your account; installing the package alone is not enough.
+3. Create an [access token](https://huggingface.co/docs/hub/main/en/security-tokens#how-to-manage-user-access-tokens)
+   and log in with `hf auth login`.
+4. The model (~7 GB) is downloaded the first time the pipeline segments a scene.
+
+**Suggested system:** a GPU (CPU works but is much slower), 16 GB RAM (32 GB
+preferred), and more than 10 GB of free disk space.
+
+### 4.4 3D extension (optional)
+
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install -r geometry3d/requirements-background-depth.txt
 ```
- 
-Download `yolo11n-pose.pt` and place it in this folder (model weights are
-git-ignored).
- 
-### 4.3 SAM 3 setup
 
-The background segmentation scripts use the `facebook/sam3` model through Hugging Face Transformers. 
-
-### Prerequisites
-
-The model is gated: user must request and receive access before the scripts can download its weights. What to do are:
-
-1. Sign in to Hugging Face or [create an account](https://huggingface.co/join).
-2. Open the [`facebook/sam3` model page](https://huggingface.co/facebook/sam3),
-   select **Agree and access repository** (or the equivalent access request
-   button), and review/accept the model's terms. Wait for access to be granted.
-   Approval is tied to your Hugging Face account; installing the Python package
-   alone does not grant access.
-
-**Storage requirements**: The pretrained SAM 3 model requires approximately **6.9 GB** for the full set of model files. 
-Additional disk space is needed for Python dependencies, cached files, datasets, and segmentation outputs. Ensure sufficient free storage before the first run.
-
-### Steps
-
-1. Install all required dependency by run command `pip install -r requirements.txt`.
-2. Get Hugging Face access token. Read more [here](https://huggingface.co/docs/hub/main/en/security-tokens#how-to-manage-user-access-tokens).
-3. Authenticate Hugging Face by run command `hf auth login`. Then enter you Hugging
-Face access token when prompted. 
-4. Done. The model will be downloaded at the first time of running the pipeline. Note that the model
-
-### Suggested system requirements
-
-- **Operating system**: Linux, Windows, or another environment supported by the required Python dependencies.
-- **Processing hardware**: A GPU is recommended for faster inference. CPU execution may be possible but significantly slower.
-- **RAM**: 16 GB is a reasonable starting point; 32 GB or more is preferable.
-- **Storage**: More than 10GB free storage available, since the `SAM3` model itself will take around 7GB of storage.
-
+New depth predictions need [LingBot-Map](https://github.com/Robbyant/lingbot-map)
+in a **separate** checkout and Python environment. Setup (local or SSH/Docker),
+units and calibration are described in [geometry3d/README.md](geometry3d/README.md).
 
 ## 5. Running
 
-### 5.1 Running the whole pipeline
+### 5.1 From raw videos
 
-***TODO***
+Put videos in `source/`, then:
 
-### 5.2 Running scripts separately
+```bash
+python pipeline.py
+```
 
-Each step can also be run on its own, e.g. to re-segment a scene without
-re-tracking. Commands, inputs and the files each script writes are listed in
-[video_processing/README.md](video_processing/README.md).
+This runs steps 1–5 on every video and writes to `data/pipeline/`.
+
+| Option | Use |
+|---|---|
+| `--source-dir DIR` | read videos from another folder |
+| `--output DIR` | write somewhere other than `data/pipeline/` |
+| `--device cuda` | run YOLO on the GPU |
+| `--skip-undistort` | keep the original image geometry |
+| `--fail-fast` | stop at the first failing clip instead of skipping it |
+| `--show-output` | also show the raw output of YOLO / SAM 3 in the console |
+
+When moving the camera, check the door entrance region (`ellipse_axes` in
+`processing/video_processor.py`), since the enter / pass / exit labels depend on it.
+
+### 5.2 Reusing saved clips
+
+To skip fisheye correction and tracking (and SAM 3, if scenes are given), list
+existing clips in a manifest. Paths are relative to the manifest file:
+
+```json
+[
+  {
+    "video": "videos/clip.mp4",
+    "trajectory": "data/existing/clip.json",
+    "pose": "data/existing/clip_pose.json",
+    "scene": "data/existing/clip_background.json"
+  }
+]
+```
+
+Only `video` and `trajectory` are required; missing files are found by name or
+generated.
+
+```bash
+python pipeline.py --processed-manifest inputs.json
+```
+
+### 5.3 With 3D features
+
+```bash
+python pipeline.py --processed-manifest inputs.json --with-3d --lingbot-runs data/lingbot
+```
+
+Cached depth in `data/lingbot/` is used when it matches the video. For new
+predictions, copy `geometry3d/lingbot.local.example.json`, fill in your
+LingBot paths and add `--lingbot-config <your file>`.
+
+The 3D values use the whole clip, so they are **not causal**, and metres are
+estimated from an assumed door width (`--door-width-m`, default 0.825).
+
+### 5.4 Single steps
+
+Each step can also run on its own, e.g. to re-segment a scene without
+re-tracking. See [processing/README.md](processing/README.md).
 
 ## 6. Output
 
-***TODO***
+Everything goes to `data/pipeline/` (layout in [data/README.md](data/README.md)):
 
-## 7. Known gaps
+- `<clip>_features.json` per clip – the features, explained in [FEATURES.md](FEATURES.md);
+- `feature_catalog.json` – every feature with its unit, inputs and whether it is causal;
+- `pipeline_run.json` – run status, including `failed_clips`;
+- `logs/pipeline_<timestamp>.log` – full log of the run.
 
-- **TODO**
+A failing clip is logged and skipped. Exit codes: `0` complete, `2` complete
+with failed clips, `1` pipeline failed.
+
+## 7. More details and tests
+
+- [processing/README.md](processing/README.md) – what each 2D step does
+- [FEATURES.md](FEATURES.md) – every feature in the output JSON
+- [geometry3d/README.md](geometry3d/README.md) – 3D / LingBot setup and validation
+- [data/README.md](data/README.md) – where the output is written
+- [source/README.md](source/README.md) – input videos and the recorder
+
+```bash
+python pipeline.py --help                      # all pipeline options
+python -m unittest discover -s tests -v        # run the tests
+```
 
 ## 8. Credits and privacy
 
-`video_processor.py` is based on
+`processing/video_processor.py` is based on
 [pose_data_collection.py](https://github.com/MirianaPassarotto/SeamAI/blob/main/automatic_door_project/intent_prediction_2026/data_collection_v2/data_collection/pose_data_collection.py)
 by Jesper Malmgren.
 
-Videos and pose data can identify people. `source/`, `data/`, videos and
-images are git-ignored — never commit recordings.
+Videos, pose tracks, previews and 3D reconstructions can identify people. They
+are git-ignored – never commit recordings. The pipeline keeps them for
+validation; it has no retention or deletion policy and does not guarantee
+anonymity.
