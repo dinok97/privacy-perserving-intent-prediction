@@ -24,7 +24,7 @@ import numpy as np
 
 # Videos to extract a background from, e.g. ["20250916_095917_id7_enter.mp4"]
 # (paths given on the command line are used instead when present)
-VIDEOS = ["../source1/20251010_132037_id181_enter.mp4"]
+VIDEOS = []
 
 STEP = 3          # use every STEP-th frame: fewer frames to hold in memory
 MAX_FRAMES = 60   # long videos are sampled more sparsely so memory stays bounded

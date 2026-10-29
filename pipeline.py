@@ -383,7 +383,7 @@ def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=
                                                feature_extractor.load_keypoints, record.get('pose'))
     if record.get('pose') is None:
         logger.debug('%s: no pose file, pose features skipped', name)
-    out = record['workspace'] / f'features_{record["video"].stem}.json'
+    out = record['workspace'] / f'{record["video"].stem}_features.json'
     feature_extractor.run_clip(trajectory, record['scene'], record.get('pose'),
                               record['background'], out, debug=True)
     features = geometry.load(out)

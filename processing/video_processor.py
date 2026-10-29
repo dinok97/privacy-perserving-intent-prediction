@@ -241,7 +241,7 @@ def classify_trajectory(frames: list[dict],
 
     Returns (label, result, reason):
       label  in {"enter", "pass", "exit"}     - the class
-      result in {"keep", "exit", "removed"}   - the folder bucket
+      result in {"keep", "removed"}           - usable or not; the class is only in label
       reason - a short string for the metadata / subfolder name
 
     Checks run in order: length, then too-few-points, then exit, then a
@@ -275,7 +275,7 @@ def classify_trajectory(frames: list[dict],
     if (start_y_n >= cfg.exit_start_y_min_norm
             and delta_d >= cfg.exit_min_delta_dist_norm
             and d_end >= max(1e-6, d_start) * cfg.exit_min_end_farther_ratio):
-        return "exit", "exit", "starts_low_and_moves_away_from_door"
+        return "exit", "keep", "starts_low_and_moves_away_from_door"
 
     # near-camera "partial person": stays low, barely moves, sits on the bottom edge.
     b_touch = bottom_touch_ratio(frames, height)
