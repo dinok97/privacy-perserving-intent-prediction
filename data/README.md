@@ -6,12 +6,10 @@ recorder creates one dated folder per day and **appends** same-day sessions:
 ```
 data/
   2026-09-19/
-    enter/    <clip>.json  <clip>.mp4  <clip>_pose.json
-    pass/
-    exit/
-    removed/  too_short/  too_few_points/  partial_bottom/  corrupt/
-    _sessions/   session_<date>_<time>.json   (per-session metadata + counts)
-    _temp/       scratch, emptied as clips finalize
+    <clip>.mp4  <clip>.json  <clip>_pose.json   one set per clip
+    <clip>.part.mp4                             clip still being written (or left by a crash)
+    clips.csv                                   one row per clip: label, cleaning result, files
+    session_<date>_<time>.json                  per-session metadata + counts
 ```
 
 File names use the source video stem, with `_2`, `_3`, and later suffixes for
