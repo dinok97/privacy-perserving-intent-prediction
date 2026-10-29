@@ -135,6 +135,7 @@ This runs steps 1–5 on every video and writes to `data/pipeline/`.
 | `--skip-undistort` | keep the original image geometry |
 | `--fail-fast` | stop at the first failing clip instead of skipping it |
 | `--show-output` | also show the raw output of YOLO / SAM 3 in the console |
+| `--debug` | also keep supporting files in `output directory`, in addition to extracted features |
 
 When moving the camera, check the door entrance region (`ellipse_axes` in
 `processing/video_processor.py`), since the enter / pass / exit labels depend on it.
