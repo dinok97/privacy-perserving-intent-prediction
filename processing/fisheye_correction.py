@@ -294,7 +294,7 @@ def correct_video(video_path, balance=BALANCE):
     if video_path.resolve() != staged_video.resolve():
         shutil.copy2(video_path, staged_video)
 
-    lens = detect_distortion(median_background(staged_video))
+    lens = detect_distortion(median_background(staged_video)[0])
     lens["video"] = video_path.name
     result = staged_video
 

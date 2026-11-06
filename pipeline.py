@@ -327,7 +327,10 @@ def run_background_extractor(records, progress, fail_fast=False):
                 import cv2
                 logger.debug('%s: extracting median background', video.name)
                 background.parent.mkdir(parents=True, exist_ok=True)
-                image = background_extraction.median_background(video)
+                image, report = background_extraction.median_background(video)
+                if report['people_left']:
+                    logger.warning('%s: %d person(s) still visible in the background, %s', video.name,
+                                   report['people_left'], 'pixelated' if background_extraction.ON_PERSON_FOUND == 'pixelate' else 'kept')
                 if not cv2.imwrite(str(background), image):
                     raise OSError(f'Could not save background {background}')
             if not scene.is_file():

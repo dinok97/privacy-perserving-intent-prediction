@@ -141,11 +141,13 @@ def check_background(image):
     return found
 
 
-def masked_background(source, step=STEP):
-    """Person-free background of a video: median over frames with people masked.
+def median_background(source, step=STEP):
+    """Person-free background of a video: median over frames with people masked,
+    then the final check (check_background pixelates anyone still visible).
 
     Returns (image, report). The report says how many frames were used, in how
-    many a person was masked, and how many pixels had no clean sample.
+    many a person was masked, how many pixels had no clean sample, and how many
+    people the final check still found.
     """
     frames = read_frames(source, step)
     boxes = [detect_people(f, MASK_CONF) for f in frames]
@@ -154,13 +156,9 @@ def masked_background(source, step=STEP):
         "frames": len(frames),
         "frames_with_people": sum(1 for b in boxes if b),
         "hole_pixels": int(holes.sum()),
+        "people_left": len(check_background(image)),
     }
     return image, report
-
-
-def median_background(source, step=STEP):
-    """Person-free background of a video (same call and return as before)."""
-    return masked_background(source, step)[0]
 
 
 def median_background_over_a_video(source, step=STEP):
@@ -168,8 +166,7 @@ def median_background_over_a_video(source, step=STEP):
 
     Returns the path of the saved image.
     """
-    image, report = masked_background(source, step)
-    found = check_background(image)
+    image, report = median_background(source, step)
 
     out = Path(source).with_name(f"{Path(source).stem}_background.png")
     cv2.imwrite(str(out), image)
@@ -179,9 +176,9 @@ def median_background_over_a_video(source, step=STEP):
     if report["hole_pixels"]:
         print(f"[BACKGROUND]   {report['hole_pixels']} pixels were covered by a person in "
               "every frame and were filled in from their surroundings")
-    if found:
+    if report["people_left"]:
         action = "pixelated" if ON_PERSON_FOUND == "pixelate" else "kept (ON_PERSON_FOUND='keep')"
-        print(f"[BACKGROUND]   WARNING: {len(found)} person(s) still visible in the "
+        print(f"[BACKGROUND]   WARNING: {report['people_left']} person(s) still visible in the "
               f"background, {action}: {out.name}")
     return str(out)
 
