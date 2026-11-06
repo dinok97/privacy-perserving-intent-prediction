@@ -320,13 +320,45 @@ def correct_video(video_path, balance=BALANCE):
     return str(result)
 
 
-def correct_videos(videos: list[str], on_progress=None):
-    """Correct every video; on_progress, if given, is called after each one."""
+def _remove_staged(video_path):
+    """Deletes what a failed correct_video left in [TEMP]_undistorted_results (never the input itself)."""
+    video_path = Path(video_path)
+    result_dir = video_path.parent / "[TEMP]_undistorted_results"
+    for name in (video_path.name, f"{video_path.stem}_undistorted.mp4", f"{video_path.stem}_lens.json"):
+        leftover = result_dir / name
+        if leftover.is_file() and leftover.resolve() != video_path.resolve():
+            leftover.unlink()
+
+
+def correct_videos(videos: list[str], on_progress=None, failures=None, fail_fast=False):
+    """Correct every video; on_progress, if given, is called after each one.
+
+    A video that fails is skipped (its staged copy is removed so the tracker
+    cannot pick it up) and added to failures as {'video', 'stage', 'error'};
+    with fail_fast=True the error is raised instead. on_progress(ok=False) is
+    called for a failed video.
+
+    Returns the paths of the videos that can go on to tracking.
+    """
     if not videos:
         raise SystemExit("Nothing to do: fill in VIDEOS or pass video paths")
 
+    usable = []
     for video in videos:
-        result = correct_video(video)
+        try:
+            result = correct_video(video)
+        except Exception as error:
+            if fail_fast:
+                raise
+            print(f"[UNDISTORT] {Path(video).name}: FAILED ({type(error).__name__}: {error})")
+            _remove_staged(video)
+            if failures is not None:
+                failures.append({"video": str(video), "stage": "fisheye",
+                                 "error": f"{type(error).__name__}: {error}"})
+            if on_progress:
+                on_progress(ok=False)
+            continue
+        usable.append(result)
         lens_path = Path(result).parent / f"{Path(video).stem}_lens.json"
         with open(lens_path) as f:
             lens = json.load(f)
@@ -339,6 +371,7 @@ def correct_videos(videos: list[str], on_progress=None):
             print(f"  use the staged video: {result}")
         if on_progress:
             on_progress()
+    return usable
 
 
 def main():

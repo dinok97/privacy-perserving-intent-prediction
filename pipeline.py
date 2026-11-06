@@ -284,19 +284,21 @@ def list_videos(folder):
 
 # ----------------------------------------------------------------------------- stages
 
-def run_fisheye_corrector(videos, source_dir, progress):
+def run_fisheye_corrector(videos, source_dir, progress, failures, fail_fast=False):
+    """Undistorts each video. A failing video is added to failures and skipped (unless fail_fast)."""
     from processing import fisheye_correction
     for video in videos:
         logger.debug('  input: %s', video)
-    call_with_progress(fisheye_correction.correct_videos, progress, videos)
+    call_with_progress(fisheye_correction.correct_videos, progress, videos, failures=failures, fail_fast=fail_fast)
     return Path(source_dir) / '[TEMP]_undistorted_results'
 
 
-def run_trajectory_tracker(source_dir, output, manifest, device, progress):
+def run_trajectory_tracker(source_dir, output, manifest, device, progress, failures, fail_fast=False):
+    """Tracks every video. A failing video is added to failures and skipped (unless fail_fast)."""
     from processing import video_processor
     logger.debug('Tracking videos from %s on device=%s', source_dir, device)
     result = call_with_progress(video_processor.run, progress, source_dir=source_dir, output_root=output,
-                                processed_manifest=manifest, device=device)
+                                processed_manifest=manifest, device=device, failures=failures, fail_fast=fail_fast)
     if not Path(manifest).is_file():
         raise FileNotFoundError(f'Tracker finished but wrote no manifest: {manifest}')
     if not geometry.load(manifest):
@@ -468,10 +470,13 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                 if not videos:
                     raise ValueError(f'No input videos found in {source_dir}')
                 with stage('Fisheye correction', len(videos)) as progress:
-                    input_dir = run_fisheye_corrector(videos, source_dir, progress)
+                    input_dir = run_fisheye_corrector(videos, source_dir, progress, summary['failed_clips'], fail_fast)
+                if len(summary['failed_clips']) == len(videos):
+                    raise RuntimeError('Fisheye correction failed for every input video')
             processed_manifest = output / 'processed_video_paths.json'
             with stage('Trajectory tracking', len(list_videos(input_dir))) as progress:
-                run_trajectory_tracker(input_dir, output / 'tracks', processed_manifest, device, progress)
+                run_trajectory_tracker(input_dir, output / 'tracks', processed_manifest, device, progress,
+                                       summary['failed_clips'], fail_fast)
         summary['processed_manifest'] = str(Path(processed_manifest).resolve())
 
         with stage('Loading clip records') as progress:
@@ -517,8 +522,8 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                     continue
                 progress()
 
-        summary['failed_clips'] = [{'video': str(r['video']), 'stage': r['failed_stage'], 'error': r['error']}
-                                   for r in records if 'error' in r]
+        summary['failed_clips'] += [{'video': str(r['video']), 'stage': r['failed_stage'], 'error': r['error']}
+                                    for r in records if 'error' in r]
         if not summary['clips']:
             raise RuntimeError('No clip was processed successfully; see the log for each clip')
 
