@@ -448,7 +448,9 @@ def render_frames(out, tracking, rows, doors, sw, sh, dw, dh):
     folder.mkdir(exist_ok=True)
     scale = np.array([sw / dw, sh / dh])
     for index in sorted({r['frame_index'] for r in rows}):
-        image = Image.open(tracking / 'yolo_frames' / f'frame_{index:06d}.jpg').convert('RGB')
+        # image = Image.open(tracking / 'yolo_frames' / f'frame_{index:06d}.jpg').convert('RGB')
+        # draw = ImageDraw.Draw(image)
+        image = Image.new('RGB', (int(sw), int(sh)), (235, 235, 235))   # blank grey canvas
         draw = ImageDraw.Draw(image)
         for door in doors[1:]:
             polygon = (np.asarray(door['source_polygon']) + .5) * scale - .5

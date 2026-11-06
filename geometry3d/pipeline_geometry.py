@@ -96,8 +96,9 @@ def adapt_trajectory(video, trajectory, output, keypoint_loader, pose=None):
                  'pose_sha256': sha(pose) if pose and Path(pose).is_file() else None,
                  'adapter_version': 2}
     if (output / 'adapter_provenance.json').is_file() and load(output / 'adapter_provenance.json') == cache_key:
-        expected = [output / 'detections.json', output / 'normalized_trajectory.json', output / 'yolo_tracking.mp4']
-        expected += [output / 'yolo_frames' / f'frame_{i:06d}.jpg' for i in range(info['frame_count'])]
+        # expected = [output / 'detections.json', output / 'normalized_trajectory.json', output / 'yolo_tracking.mp4']
+        # expected += [output / 'yolo_frames' / f'frame_{i:06d}.jpg' for i in range(info['frame_count'])]
+        expected = [output / 'detections.json', output / 'normalized_trajectory.json']
         if all(p.is_file() for p in expected):
             return output / 'normalized_trajectory.json'
     keypoints = keypoint_loader(source, load(pose) if pose and Path(pose).is_file() else None,
@@ -132,32 +133,32 @@ def adapt_trajectory(video, trajectory, output, keypoint_loader, pose=None):
         'meta': {**meta, 'clip_video_sha256': info['sha256'], 'time_basis': 'encoded_video',
                  'original_fps': source.get('fps'), 'original_effective_fps': meta.get('effective_fps'),
                  'effective_fps': info['fps'], 'record_fps': info['fps']}})
-    images = output / 'yolo_frames'
-    images.mkdir(exist_ok=True)
-    cap = cv2.VideoCapture(str(video))
-    writer = cv2.VideoWriter(str(output / 'yolo_tracking.mp4'), cv2.VideoWriter_fourcc(*'mp4v'),
-                             info['fps'], (info['width'], info['height']))
-    if not writer.isOpened():
-        cap.release()
-        raise RuntimeError('Could not create the reused-tracking preview')
-    try:
-        for frame in frames:
-            ok, image = cap.read()
-            if not ok:
-                raise ValueError('Decoded video ended before the saved trajectory')
-            for detection in frame['detections']:
-                x1, y1, x2, y2 = map(int, detection['bbox'])
-                cv2.rectangle(image, (x1, y1), (x2, y2), (255, 100, 0), 2)
-                cv2.putText(image, f'Reused track {tid}', (x1, max(15, y1 - 5)),
-                            cv2.FONT_HERSHEY_SIMPLEX, .45, (255, 100, 0), 1)
-                for x, y, confidence in detection['keypoints'] or []:
-                    if confidence >= .5:
-                        cv2.circle(image, (int(x), int(y)), 2, (0, 220, 220), -1)
-            writer.write(image)
-            cv2.imwrite(str(images / f'frame_{frame["frame_index"]:06d}.jpg'), image)
-    finally:
-        cap.release()
-        writer.release()
+    # images = output / 'yolo_frames'
+    # images.mkdir(exist_ok=True)
+    # cap = cv2.VideoCapture(str(video))
+    # writer = cv2.VideoWriter(str(output / 'yolo_tracking.mp4'), cv2.VideoWriter_fourcc(*'mp4v'),
+    #                          info['fps'], (info['width'], info['height']))
+    # if not writer.isOpened():
+    #     cap.release()
+    #     raise RuntimeError('Could not create the reused-tracking preview')
+    # try:
+    #     for frame in frames:
+    #         ok, image = cap.read()
+    #         if not ok:
+    #             raise ValueError('Decoded video ended before the saved trajectory')
+    #         for detection in frame['detections']:
+    #             x1, y1, x2, y2 = map(int, detection['bbox'])
+    #             cv2.rectangle(image, (x1, y1), (x2, y2), (255, 100, 0), 2)
+    #             cv2.putText(image, f'Reused track {tid}', (x1, max(15, y1 - 5)),
+    #                         cv2.FONT_HERSHEY_SIMPLEX, .45, (255, 100, 0), 1)
+    #             for x, y, confidence in detection['keypoints'] or []:
+    #                 if confidence >= .5:
+    #                     cv2.circle(image, (int(x), int(y)), 2, (0, 220, 220), -1)
+    #         writer.write(image)
+    #         cv2.imwrite(str(images / f'frame_{frame["frame_index"]:06d}.jpg'), image)
+    # finally:
+    #     cap.release()
+    #     writer.release()
     save(output / 'adapter_provenance.json', cache_key)
     return output / 'normalized_trajectory.json'
 

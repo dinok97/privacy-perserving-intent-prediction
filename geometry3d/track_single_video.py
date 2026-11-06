@@ -38,8 +38,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     if (output / 'detections.json').exists():
         parser.error('detections.json already exists; reuse it rather than overwrite inference.')
-    frames_dir = output / 'yolo_frames'
-    frames_dir.mkdir(exist_ok=True)
+    # frames_dir = output / 'yolo_frames'
+    # frames_dir.mkdir(exist_ok=True)
     torch.set_num_threads(4)
     started = time.perf_counter()
     capture = cv2.VideoCapture(str(args.video))
@@ -50,10 +50,10 @@ def main():
     if fps <= 0 or min(width, height) <= 0:
         raise ValueError('Cannot read source video geometry/timing')
     model = YOLO(args.model)
-    writer = cv2.VideoWriter(str(output / 'yolo_tracking.mp4'),
-                             cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-    if not writer.isOpened():
-        raise RuntimeError('Cannot open annotated video writer')
+    # writer = cv2.VideoWriter(str(output / 'yolo_tracking.mp4'),
+    #                          cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+    # if not writer.isOpened():
+    #     raise RuntimeError('Cannot open annotated video writer')
     frames, seen_ids = [], set()
     try:
         while True:
@@ -73,15 +73,15 @@ def main():
                 detections.append({'track_id': track_id, 'confidence': confidences[track_id],
                                    'bbox': bbox, 'center': centre, 'keypoints': keypoints})
             frames.append({'frame_index': index, 't': index / fps, 'detections': detections})
-            annotated = result.plot()
-            writer.write(annotated)
-            cv2.imwrite(str(frames_dir / f'frame_{index:06d}.jpg'), annotated,
-                        [cv2.IMWRITE_JPEG_QUALITY, 92])
+            # annotated = result.plot()
+            # writer.write(annotated)
+            # cv2.imwrite(str(frames_dir / f'frame_{index:06d}.jpg'), annotated,
+            #             [cv2.IMWRITE_JPEG_QUALITY, 92])
             print(f'Frame {index + 1}/{expected_frames}: track IDs '
                   f'{[d["track_id"] for d in detections]}', flush=True)
     finally:
         capture.release()
-        writer.release()
+        # writer.release()
     if len(frames) != expected_frames:
         raise ValueError(f'Decoded {len(frames)} frames, expected {expected_frames}')
     metadata = {
@@ -120,10 +120,10 @@ def main():
         (output / f'{name}_pose.json').write_text(json.dumps(pose, indent=2) + '\n')
     result = {'metadata': metadata, 'frames': frames}
     (output / 'detections.json').write_text(json.dumps(result, indent=2) + '\n')
-    validation_capture = cv2.VideoCapture(str(output / 'yolo_tracking.mp4'))
-    output_count = int(validation_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    validation_capture.release()
-    assert output_count == len(frames)
+    # validation_capture = cv2.VideoCapture(str(output / 'yolo_tracking.mp4'))
+    # output_count = int(validation_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    # validation_capture.release()
+    # assert output_count == len(frames)
     print(json.dumps(metadata, indent=2), flush=True)
 
 
