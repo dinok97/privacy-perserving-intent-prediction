@@ -534,7 +534,7 @@ class LivePoseCollector:
         if self.cfg.record_fps and self.cfg.record_fps > 0:
             self.record_fps = float(self.cfg.record_fps)
             fps_origin = "record_fps"
-        elif reported_fps and reported_fps > 1:
+        elif reported_fps and reported_fps > 0:
             self.record_fps = float(reported_fps)
             fps_origin = "camera-reported"
         elif not for_writing:
