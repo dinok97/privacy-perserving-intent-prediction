@@ -330,6 +330,15 @@ def _remove_staged(video_path):
             leftover.unlink()
 
 
+def _empty_staging_folders(videos):
+    """Starts a run with an empty [TEMP]_undistorted_results, so nothing from an earlier run is left in it.
+
+    A folder is left alone if one of the inputs lives inside it."""
+    for folder in {Path(video).parent / "[TEMP]_undistorted_results" for video in videos}:
+        if folder.is_dir() and not any(Path(video).resolve().parent == folder.resolve() for video in videos):
+            shutil.rmtree(folder)
+
+
 def correct_videos(videos: list[str], on_progress=None, failures=None, fail_fast=False):
     """Correct every video; on_progress, if given, is called after each one.
 
@@ -343,6 +352,7 @@ def correct_videos(videos: list[str], on_progress=None, failures=None, fail_fast
     if not videos:
         raise SystemExit("Nothing to do: fill in VIDEOS or pass video paths")
 
+    _empty_staging_folders(videos)
     usable = []
     for video in videos:
         try:

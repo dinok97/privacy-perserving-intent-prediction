@@ -134,6 +134,7 @@ class CollectorConfig:
     camera_index: int = 0
     source_dir: str = "source"       # video files are read from this directory
     source_video: Optional[str] = None  # optional specific video; otherwise first file in source_dir
+    source_videos: Optional[list] = None  # explicit list of videos to process (overrides source_dir scanning)
     processed_manifest: Optional[str] = None  # explicit manifest path for pipeline orchestration
     distort: bool = False            # False -> no calibration; True -> use CAMERA_MTX/CAMERA_DIST
     ellipse_axes: tuple[int, int] = (480, 130)   # door entrance region
@@ -833,6 +834,8 @@ class LivePoseCollector:
     def _source_paths(self) -> list[Path]:
         if self.cfg.source_video:
             sources = [Path(self.cfg.source_video)]
+        elif self.cfg.source_videos:
+            sources = [Path(video) for video in self.cfg.source_videos]
         else:
             source_dir = Path(self.cfg.source_dir)
             sources = sorted(
@@ -1058,7 +1061,7 @@ def _config_to_jsonable(cfg: CollectorConfig) -> dict:
 # Run the collector
 # ---------------------------------------------------------------------------
 def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu",
-        on_progress=None, failures=None, fail_fast=False) -> list[str]:
+        on_progress=None, failures=None, fail_fast=False, videos=None) -> list[str]:
     # ----------------------------------------------------------------------- #
     # Settings -- edit these, then just run the script (Run in your editor, or #
     # `python video_processor.py`). No command-line arguments are needed. #
@@ -1079,6 +1082,7 @@ def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu"
         source_dir=str(source_dir),
         processed_manifest=str(processed_manifest) if processed_manifest else None,
         source_video=None,           # set a path to override source_dir selection
+        source_videos=[str(v) for v in videos] if videos else None,  # exact list from the pipeline; else scan source_dir
         ellipse_axes=(480, 130),     # door entrance region (half-ellipse)
         distort=False,               # new video source: no Jetson calibration by default
         # --- run mode ---
