@@ -12,7 +12,9 @@ import json
 import math
 from pathlib import Path
 import subprocess
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from .lingbot_inference import PREDICTION_FIELDS
 from project_paths import resolve_project_path
 
 
@@ -183,10 +185,17 @@ def select_depth_run(runs_root, info):
 
 
 def ensure_depth_run(video, info, runs_root, workspace, command_config=None):
+    run = Path(workspace) / 'lingbot_run'
+    manifest = run / 'processing_manifest.json'
+    predictions = run / info['stem']
+    if predictions.exists() or manifest.is_file():
+        if not manifest.is_file() or load(manifest).get('prediction_fields') != list(PREDICTION_FIELDS):
+            raise ValueError('Existing LingBot output may contain RGB frames; use a fresh output directory.')
+        cached = select_depth_run(manifest, info)
+        if cached is None:
+            raise ValueError('Existing LingBot output belongs to a different clip; use a fresh output directory.')
+        return cached
     found = select_depth_run(runs_root, info)
-    local_manifest = Path(workspace) / 'lingbot_run/processing_manifest.json'
-    if found is None and local_manifest.is_file():
-        found = select_depth_run(local_manifest, info)
     if found:
         return found
     if command_config is None:
@@ -198,49 +207,41 @@ def ensure_depth_run(video, info, runs_root, workspace, command_config=None):
     command = config.get('command')
     if 'runtime' not in config and (not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command)):
         raise ValueError('LingBot command config needs a nonempty command array; shell strings are not accepted')
-    run = Path(workspace) / 'lingbot_run'
     run.mkdir(parents=True, exist_ok=True)
-    values = {'video': str(Path(video).resolve()), 'output': str(run.resolve()),
-              'stem': info['stem'], 'predictions': str((run / info['stem']).resolve())}
-    # Replace only our tokens; literal braces in Python/JSON arguments are not templates.
-    argv = list(command or [])
-    for key, value in values.items():
-        argv = [arg.replace('{' + key + '}', value) for arg in argv]
     cwd = config.get('cwd')
     if cwd is not None:
         cwd = (config_path.parent / cwd).resolve()
-    with (run / 'inference.log').open('w', encoding='utf-8') as log:
-        try:
-            if 'runtime' in config:
-                from . import lingbot_runtime
-                lingbot_runtime.run(config, config_path, video, run, log)
-            else:
-                subprocess.run(argv, cwd=cwd, check=True, stdout=log, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError as error:
-            marker = run / 'processing_manifest.json'
-            if marker.is_file():
-                marker.replace(run / 'provider_manifest.json')
-            raise RuntimeError(f'LingBot inference failed; see {run / "inference.log"}') from error
-    # A provider completion marker becomes a cache entry only after our checks.
-    manifest = run / 'processing_manifest.json'
-    existing = load(manifest) if manifest.is_file() else {}
-    if manifest.is_file():
-        manifest.replace(run / 'provider_manifest.json')
-    predictions = run / info['stem']
+    # A legacy/custom provider can emit RGB. Only validated arrays are published.
+    with TemporaryDirectory(prefix='lingbot-provider-') as temp:
+        provider_output = Path(temp)
+        values = {'video': str(Path(video).resolve()), 'output': str(provider_output),
+                  'stem': info['stem'], 'predictions': str(provider_output / info['stem'])}
+        # Replace only our tokens; literal braces in Python/JSON arguments are not templates.
+        argv = list(command or [])
+        for key, value in values.items():
+            argv = [arg.replace('{' + key + '}', value) for arg in argv]
+        with (run / 'inference.log').open('w', encoding='utf-8') as log:
+            try:
+                if 'runtime' in config:
+                    from . import lingbot_runtime
+                    lingbot_runtime.run(config, config_path, video, provider_output, log)
+                else:
+                    subprocess.run(argv, cwd=cwd, check=True, stdout=log, stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError(f'LingBot inference failed; see {run / "inference.log"}') from error
+        publish_depth_run(provider_output, manifest, info, sha(config_path))
+    return manifest
+
+
+def publish_depth_run(provider_output, manifest, info, config_hash):
+    import numpy as np
+
+    provider_manifest = provider_output / manifest.name
+    existing = load(provider_manifest) if provider_manifest.is_file() else {}
+    predictions = provider_output / info['stem']
     expected = [f'frame_{i:06d}.npz' for i in range(info['frame_count'])]
     if sorted(p.name for p in predictions.glob('frame_*.npz')) != expected:
         raise ValueError('Configured LingBot command must export every frame into {predictions}/frame_XXXXXX.npz')
-    import numpy as np
-    for name in expected:
-        with np.load(predictions / name, allow_pickle=False) as data:
-            required = {'depth', 'depth_conf', 'images', 'intrinsic', 'extrinsic'}
-            if not required.issubset(data.files) or not all(np.isfinite(data[k]).all() for k in required):
-                raise ValueError(f'Incomplete or nonfinite prediction arrays: {name}')
-            h, w, channels = data['depth'].shape
-            if (channels != 1 or data['depth_conf'].shape != (h, w) or data['images'].shape != (3, h, w)
-                    or data['intrinsic'].shape != (3, 3) or data['extrinsic'].shape != (3, 4)
-                    or not (data['depth'] > 0).all()):
-                raise ValueError(f'Invalid prediction geometry: {name}')
     # The orchestrator records the exact command input, not guessed filenames from another run.
     provider_source = existing.get('source', {})
     for field in ('sha256', 'width', 'height', 'frame_count'):
@@ -250,9 +251,27 @@ def ensure_depth_run(video, info, runs_root, workspace, command_config=None):
         raise ValueError('Provider wrote provenance for different video timing')
     if existing.get('extrinsic_convention', 'world_to_camera') != 'world_to_camera':
         raise ValueError('LingBot exports must use world-to-camera extrinsics')
-    save(manifest, {**existing, 'source': info, 'provider_config_sha256': sha(config_path),
-                    'all_source_frames_processed': True})
-    return run / 'processing_manifest.json'
+    with TemporaryDirectory(prefix='.depth-', dir=manifest.parent) as temp:
+        staged = Path(temp) / info['stem']
+        staged.mkdir()
+        for name in expected:
+            with np.load(predictions / name, allow_pickle=False) as data:
+                if not set(PREDICTION_FIELDS).issubset(data.files):
+                    raise ValueError(f'Incomplete prediction arrays: {name}')
+                arrays = {key: data[key] for key in PREDICTION_FIELDS}
+            depth = arrays['depth']
+            if not all(np.isfinite(value).all() for value in arrays.values()):
+                raise ValueError(f'Nonfinite prediction arrays: {name}')
+            if (depth.ndim != 3 or depth.shape[-1] != 1 or arrays['depth_conf'].shape != depth.shape[:2]
+                    or arrays['intrinsic'].shape != (3, 3) or arrays['extrinsic'].shape != (3, 4)
+                    or not (depth > 0).all()):
+                raise ValueError(f'Invalid prediction geometry: {name}')
+            np.savez_compressed(staged / name, **arrays)
+        marker = Path(temp) / manifest.name
+        save(marker, {**existing, 'source': info, 'provider_config_sha256': config_hash,
+                      'prediction_fields': list(PREDICTION_FIELDS), 'all_source_frames_processed': True})
+        staged.rename(manifest.parent / staged.name)
+        marker.replace(manifest)
 
 
 def run_geometry(record, runs_root, command_config=None, assumed_width=.825):

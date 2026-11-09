@@ -44,15 +44,16 @@ class AdapterTests(unittest.TestCase):
 
     def test_unbatch_and_preserve_world_to_camera_pose(self):
         out = self.root / 'frames'
-        inference.export_arrays(arrays(), np.zeros((2, 3, 14, 14)), out, 2)
+        predictions = {**arrays(), 'images': np.ones((2, 3, 14, 14))}
+        inference.export_arrays(predictions, out, 2)
         with np.load(out / 'frame_000001.npz') as frame:
             self.assertEqual(frame['depth'].shape, (14, 14, 1))
-            self.assertEqual(frame['images'].dtype, np.float32)
+            self.assertEqual(set(frame.files), {'depth', 'depth_conf', 'intrinsic', 'extrinsic'})
             self.assertEqual(frame['extrinsic'][0, 3], 2)
 
     def test_single_frame_does_not_lose_its_frame_axis(self):
         out = self.root / 'single'
-        inference.export_arrays(arrays(count=1), np.zeros((1, 3, 14, 14)), out, 1)
+        inference.export_arrays(arrays(count=1), out, 1)
         self.assertEqual([p.name for p in out.iterdir()], ['frame_000000.npz'])
 
     def test_invalid_predictions_never_publish_frames(self):
@@ -71,7 +72,7 @@ class AdapterTests(unittest.TestCase):
             else:
                 values['intrinsic'][0, 0, 0, 0] = 0
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
-                inference.export_arrays(values, np.zeros((2, 3, 14, 14)), self.root / mutation, 2)
+                inference.export_arrays(values, self.root / mutation, 2)
             self.assertFalse((self.root / mutation).exists())
 
     def video(self, width=32, height=24):
@@ -133,6 +134,8 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(inference.sha256(args.output / video.stem / 'frame_000000.npz'),
                          geometry.sha(args.output / video.stem / 'frame_000000.npz'))
         self.assertTrue((args.output / 'processing_manifest.json').is_file())
+        self.assertFalse(any(args.output.rglob('*.png')))
+        self.assertTrue(all(not Path(frame).exists() for frame in preprocess.call_args.args[0]))
         self.assertEqual(preprocess.call_args.kwargs, {'mode': 'crop', 'image_size': 518, 'patch_size': 14})
 
 
@@ -190,6 +193,9 @@ class RuntimeTests(unittest.TestCase):
         uploads = [argv for argv in calls if argv[0] == 'scp' and '-r' not in argv]
         self.assertEqual(len(uploads), 2)
         self.assertTrue(all(argv[-1].startswith('user@[fd7a::1]:') for argv in uploads))
+        cleanup = next(shlex.split(argv[-1]) for argv in calls if argv[0] == 'ssh' and argv[-1].startswith('rm '))
+        self.assertEqual(cleanup[:3], ['rm', '-f', '--'])
+        self.assertTrue(cleanup[3].endswith('/' + self.video.name))
         result = json.loads((self.output / 'processing_manifest.json').read_text())
         self.assertEqual(result['remote_execution']['image'], 'lingbot:gpu')
 
@@ -200,7 +206,7 @@ class RuntimeTests(unittest.TestCase):
                 'fps': 12., 'frame_count': 2, 'width': 32, 'height': 24}
 
         def provider(config, path, video, output, log):
-            inference.export_arrays(arrays(), np.zeros((2, 3, 14, 14)), output / video.stem, 2)
+            inference.export_arrays(arrays(), output / video.stem, 2)
             geometry.save(output / 'processing_manifest.json', {'source': info, 'provider': {'revision': 'external'}})
 
         with patch.object(runtime, 'run', side_effect=provider) as run:

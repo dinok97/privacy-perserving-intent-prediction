@@ -41,8 +41,8 @@ def source_info(manifest: dict) -> dict:
     }
 
 
-def render_maps(output: Path, stem: str, count: int, rgb: np.ndarray,
-                depth: np.ndarray, relative_mad: np.ndarray, stable: np.ndarray,
+def render_maps(output: Path, stem: str, count: int, depth: np.ndarray,
+                relative_mad: np.ndarray, stable: np.ndarray,
                 low: float, high: float, tolerance: float, inlier_fraction: float):
     cmap = plt.get_cmap('turbo').copy()
     cmap.set_bad('#777777')
@@ -55,19 +55,16 @@ def render_maps(output: Path, stem: str, count: int, rgb: np.ndarray,
     fig.savefig(output / 'background_depth_heatmap.png', dpi=160)
     plt.close(fig)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), layout='constrained')
-    axes[0, 0].imshow(rgb)
-    axes[0, 0].set_title('Temporal-median RGB reference')
-    p = axes[0, 1].imshow(depth, cmap=cmap, vmin=low, vmax=high, interpolation='nearest')
-    axes[0, 1].set_title('Temporal-median depth')
-    fig.colorbar(p, ax=axes[0, 1], label='Model units', shrink=0.85, extend='both')
-    q = axes[1, 0].imshow(100 * relative_mad, cmap='magma', vmin=0, vmax=30,
-                         interpolation='nearest')
-    axes[1, 0].set_title('Temporal variation (lower is more consistent)')
-    fig.colorbar(q, ax=axes[1, 0], label='Median absolute deviation / depth (%)',
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), layout='constrained')
+    p = axes[0].imshow(depth, cmap=cmap, vmin=low, vmax=high, interpolation='nearest')
+    axes[0].set_title('Temporal-median depth')
+    fig.colorbar(p, ax=axes[0], label='Model units', shrink=0.85, extend='both')
+    q = axes[1].imshow(100 * relative_mad, cmap='magma', vmin=0, vmax=30, interpolation='nearest')
+    axes[1].set_title('Temporal variation')
+    fig.colorbar(q, ax=axes[1], label='Median absolute deviation / depth (%)',
                  shrink=0.85, extend='max')
-    axes[1, 1].imshow(stable, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
-    axes[1, 1].set_title(
+    axes[2].imshow(stable, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
+    axes[2].set_title(
         f'White: {100 * inlier_fraction:.0f}% of valid frames within '
         f'{100 * tolerance:.0f}% of median\n'
         f'{100 * stable.mean():.1f}% of pixels pass the stability criteria', fontsize=10)
@@ -88,7 +85,7 @@ def process_run(manifest_path: Path, output_root: Path, args) -> dict:
     expected_names = [f'frame_{i:06d}.npz' for i in range(count)]
     if [file.name for file in files] != expected_names:
         raise ValueError(f'{stem}: missing or unexpected prediction frames')
-    depth_frames, confidence_frames, rgb_frames = [], [], []
+    depth_frames, confidence_frames = [], []
     for file in files:
         with np.load(file, allow_pickle=False) as data:
             depth = data['depth']
@@ -96,15 +93,11 @@ def process_run(manifest_path: Path, output_root: Path, args) -> dict:
                 raise ValueError(f'{file}: unsupported depth shape {depth.shape}')
             depth = depth[..., 0].astype(np.float32)
             confidence = data['depth_conf'].astype(np.float32)
-            rgb = data['images'].transpose(1, 2, 0)
-            if confidence.shape != depth.shape or rgb.shape != (*depth.shape, 3):
-                raise ValueError(f'{file}: RGB/confidence are not on the depth grid')
-            if not np.isfinite(rgb).all() or rgb.min() < 0 or rgb.max() > 1:
-                raise ValueError(f'{file}: RGB values outside the expected [0, 1] range')
+            if confidence.shape != depth.shape:
+                raise ValueError(f'{file}: confidence is not on the depth grid')
             valid = np.isfinite(depth) & (depth > 0) & np.isfinite(confidence)
             depth_frames.append(np.where(valid, depth, np.nan))
             confidence_frames.append(np.where(valid, confidence, np.nan))
-            rgb_frames.append(np.rint(255 * rgb).astype(np.uint8))
 
     depth_stack = np.stack(depth_frames)
     del depth_frames
@@ -128,12 +121,12 @@ def process_run(manifest_path: Path, output_root: Path, args) -> dict:
         np.nanmedian(frame[stable] / median[stable]) if stable.any() else np.nan
         for frame in depth_stack
     ], dtype=np.float32)
-    reference_rgb = np.median(np.stack(rgb_frames), axis=0).astype(np.uint8)
     confidence_median = np.nanmedian(np.stack(confidence_frames), axis=0).astype(np.float32)
-    del depth_stack, absolute_difference, inliers, rgb_frames, confidence_frames
+    del depth_stack, absolute_difference, inliers, confidence_frames
 
     output = output_root / stem
     output.mkdir(parents=True, exist_ok=True)
+    (output / 'background_rgb_reference.png').unlink(missing_ok=True)
     np.save(output / 'background_depth.npy', median, allow_pickle=False)
     np.save(output / 'stable_background_depth.npy', stable_depth, allow_pickle=False)
     np.savez_compressed(
@@ -144,12 +137,11 @@ def process_run(manifest_path: Path, output_root: Path, args) -> dict:
         inlier_fraction=inlier_fraction, confidence_median=confidence_median,
         frame_to_median_scale_ratio=frame_ratios,
     )
-    Image.fromarray(reference_rgb).save(output / 'background_rgb_reference.png')
     Image.fromarray(stable.astype(np.uint8) * 255).save(output / 'stable_mask.png')
     low, high = np.nanpercentile(median, [1, 99]).tolist()
     if high <= low:
         high = low + max(abs(low) * 0.01, 1e-6)
-    render_maps(output, stem, count, reference_rgb, median, relative_mad,
+    render_maps(output, stem, count, median, relative_mad,
                 stable, low, high, args.relative_tolerance, args.min_inlier_fraction)
 
     # Reload the actual deliverables, ensuring array values and binary masks agree.
@@ -242,7 +234,6 @@ def write_index(output: Path, summaries: list[dict]):
         'stable_mask.png: original prediction-grid binary image (white=1; black=0).\n'
         'background_depth_heatmap.png: median depth with model-unit colour bar (1st-99th percentile limits).\n'
         'validation_preview.png: RGB reference, depth, temporal variability and binary mask.\n'
-        'background_rgb_reference.png: temporal median of aligned saved RGB frames.\n'
         'metadata.json: source provenance, settings, limitations and output checksums.\n\n'
         'No person labels or inference. Estimates are separate per clip. No scale alignment is applied.\n'
         'Stability is not proof of background: an object present for most frames may be retained.\n'

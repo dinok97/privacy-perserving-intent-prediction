@@ -52,6 +52,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+from tempfile import TemporaryDirectory
 import time
 
 PROJECT = Path(__file__).resolve().parent
@@ -379,11 +380,14 @@ def run_segmentation(records, pending, progress, fail_fast=False):
             progress.render()
 
 
-def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=None, assumed_width=.825):
+def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=None, assumed_width=.825, *, debug=True):
     from processing import feature_extractor
     name = record['video'].name
     trajectory = record['trajectory']
     if with_3d:
+        workspace = record['workspace'] / 'geometry_3d'
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / '.depth-only').touch(exist_ok=True)
         record['tracking'] = record['workspace'] / 'geometry_3d/distances/tracking'
         logger.debug('%s: adapting trajectory for 3D', name)
         trajectory = geometry.adapt_trajectory(record['video'], trajectory, record['tracking'],
@@ -392,7 +396,7 @@ def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=
         logger.debug('%s: no pose file, pose features skipped', name)
     out = record['workspace'] / f'{record["video"].stem}_features.json'
     feature_extractor.run_clip(trajectory, record['scene'], record.get('pose'),
-                              record['background'], out, debug=True)
+                              record['background'], out, debug=debug)
     features = geometry.load(out)
     features['info']['clip_video'] = record['video'].name
     features['info']['clip_video_sha256'] = record['video_info']['sha256']
@@ -425,6 +429,7 @@ def delete_debug_files(records):
             f'{video_filename}_background.json',
             f'{video_filename}_background_overlay.png',
             f'{video_filename}_background.png',
+            f'{video_filename}_features_debug.png',
             f'features_{video_filename}_debug.png',
         )
         for filename in filenames:
@@ -453,6 +458,11 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                  log_file=None,
                  debug=False):
     output = Path(output).resolve()
+    if with_3d and ((output / 'tracks').exists() or any(
+            not (workspace / '.depth-only').is_file() for workspace in output.glob('*/geometry_3d'))):
+        message = 'This output directory may contain video from an older run; use a fresh --output directory.'
+        logger.error(message)
+        raise ValueError(message)
     output.mkdir(parents=True, exist_ok=True)
     source_dir = Path(source_dir).resolve()
     reused_tracking = processed_manifest is not None
@@ -462,6 +472,8 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
     logger.debug('Pipeline started | output=%s | with_3d=%s | reused_tracking=%s | device=%s | fail_fast=%s',
                  output, with_3d, reused_tracking, device, fail_fast)
     t_start = time.perf_counter()
+    private_tracking = None
+    records = []
     try:
         if processed_manifest is None:
             videos = list_videos(source_dir)
@@ -475,11 +487,16 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                     tracked = run_fisheye_corrector(videos, progress, summary['failed_clips'], fail_fast)
                 if not tracked:
                     raise RuntimeError('Fisheye correction failed for every input video')
-            processed_manifest = output / 'processed_video_paths.json'
+            tracking_root = output
+            if with_3d:
+                private_tracking = TemporaryDirectory(prefix='pipeline-tracking-')
+                tracking_root = Path(private_tracking.name)
+            processed_manifest = tracking_root / 'processed_video_paths.json'
             with stage('Trajectory tracking', len(tracked)) as progress:
-                run_trajectory_tracker(tracked, source_dir, output / 'tracks', processed_manifest, device, progress,
+                run_trajectory_tracker(tracked, source_dir, tracking_root / 'tracks', processed_manifest, device, progress,
                                        summary['failed_clips'], fail_fast)
-        summary['processed_manifest'] = str(Path(processed_manifest).resolve())
+        if private_tracking is None:
+            summary['processed_manifest'] = str(Path(processed_manifest).resolve())
 
         with stage('Loading clip records') as progress:
             records = geometry.records_from_manifest(processed_manifest)
@@ -513,8 +530,9 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                 name = record['video'].name
                 logger.debug('Feature extraction: %s', name)
                 try:
-                    summary['clips'].append(run_feature_extractor(record, with_3d, lingbot_runs,
-                                                                  lingbot_command_config, assumed_width))
+                    summary['clips'].append(run_feature_extractor(
+                        record, with_3d, lingbot_runs, lingbot_command_config, assumed_width,
+                        debug=debug or not with_3d))
                 except Exception as error:
                     if fail_fast:
                         raise
@@ -547,6 +565,10 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
         logger.exception('Pipeline failed: %s', summary['error'])
         raise
     finally:
+        if private_tracking is not None:
+            private_tracking.cleanup()
+        if with_3d and not debug and summary['status'] == 'failed':
+            delete_debug_files([record for record in records if 'workspace' in record])
         summary['duration_s'] = round(time.perf_counter() - t_start, 1)
         geometry.save(output / 'pipeline_run.json', summary)
         logger.debug('Run summary saved to %s', output / 'pipeline_run.json')
@@ -558,7 +580,8 @@ def main():
     global CAPTURE_OUTPUT
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--source-dir', type=Path, default=SOURCE_DIR)
-    parser.add_argument('--output', type=Path, default=PROJECT / 'data/pipeline')
+    parser.add_argument('--output', type=Path, default=PROJECT / 'data/pipeline',
+                        help='Output directory. Use a fresh directory for 3D after upgrading from an older version.')
     parser.add_argument('--processed-manifest', type=Path, help='Reuse saved clips/trajectory JSON; skip fisheye and YOLO stages')
     parser.add_argument('--with-3d', action='store_true', help='Append LingBot distances and closure rates to 2D features')
     parser.add_argument('--lingbot-runs', type=Path, default=PROJECT / 'data/lingbot')
@@ -571,7 +594,7 @@ def main():
     parser.add_argument('--show-output', action='store_true',
                         help='Also print the raw output of the submodules (YOLO, SAM3, undistort) to the console')
     parser.add_argument('--debug', action='store_true',
-                        help='Keep supporting files, including temporary undistorted videos, in addition to extracted features')
+                        help='Keep private debug files, including background images and temporary undistorted videos')
     args = parser.parse_args()
     
     CAPTURE_OUTPUT = not args.show_output

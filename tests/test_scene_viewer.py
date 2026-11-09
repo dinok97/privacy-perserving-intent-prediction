@@ -22,9 +22,12 @@ class OfflineSceneViewer(unittest.TestCase):
             labels = np.ones((14, 14), dtype=np.uint8)
             with patch.object(segmentation, 'get_plotlyjs', return_value='/* test bundle */'):
                 segmentation.write_viewer(out, 'scene', np.zeros((14, 14, 3)),
-                    np.zeros((14, 14, 3), dtype=np.uint8), labels, labels,
+                    labels, labels,
                     labels.astype(bool), np.ones((14, 14)), scene)
-            scripts = re.findall(r'<script[^>]+src="([^"]+)"', (out / 'viewer.html').read_text(encoding='utf-8'))
+            viewer = (out / 'viewer.html').read_text(encoding='utf-8')
+            self.assertIn('aligned_label_colours.png', viewer)
+            self.assertNotIn('Original RGB', viewer)
+            scripts = re.findall(r'<script[^>]+src="([^"]+)"', viewer)
             self.assertTrue(scripts)
             for script in scripts:
                 self.assertTrue((out / script).is_file(), script)
