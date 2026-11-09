@@ -644,14 +644,19 @@ def load_keypoints(traj, pose, W, H):
     return out
 
 
-def ground_point(kp, bbox, H):
-    """Mid-ankle if both ankles are visible, else bbox bottom-centre."""
+def ground_point(kp, bbox, H, center=None):
+    """Mid-ankle if both ankles are visible, else bbox bottom-centre, else the tracker's centre point.
+
+    kp may be None (no pose for this frame)."""
     c = PARAMS["kp_conf_min"]
-    la, ra = kp[K["left_ankle"]], kp[K["right_ankle"]]
-    if la[2] >= c and ra[2] >= c:
-        return (la[:2] + ra[:2]) / 2, "ankles"
+    if kp is not None:
+        la, ra = kp[K["left_ankle"]], kp[K["right_ankle"]]
+        if la[2] >= c and ra[2] >= c:
+            return (la[:2] + ra[:2]) / 2, "ankles"
     if bbox is not None:
         return np.array([(bbox[0] + bbox[2]) / 2, bbox[3]]), "bbox_bottom"
+    if center is not None:
+        return np.asarray(center[:2], float), "center"
     return None, None
 
 
@@ -724,6 +729,12 @@ def pose_features(kp, bh, heading_deg):
     return f
 
 
+# pose block of a frame that has a track (bbox / centre) but no keypoints: same keys, all None
+_no_kp = np.full((17, 3), np.nan)
+_no_kp[:, 2] = 0.0
+NO_POSE = {key: None for key in pose_features(_no_kp, None, None)}
+
+
 # ---------------------------------------------------------------- main extraction
 def extract(traj, scene_json, pose=None, background=None, sources=None, manual_exits=None):
     W, H = int(traj["frame_width"]), int(traj["frame_height"])
@@ -735,7 +746,9 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
 
     # ---- pass 1: raw per-frame geometry
     t = np.array([fr["t"] for fr in frames_in], float)
-    det = np.array([kps[i] is not None for i in range(n)])
+    # a frame counts as detected if the tracker saw the person: keypoints, bbox or centre (pose is optional)
+    det = np.array([kps[i] is not None or fr.get("bbox") is not None or fr.get("center") is not None
+                    for i, fr in enumerate(frames_in)])
     gp = np.full((n, 2), np.nan)
     gsrc = [None] * n
     bbox_h = np.full(n, np.nan)
@@ -744,7 +757,7 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
         if not det[i]:
             continue
         bb = fr.get("bbox")
-        p, src = ground_point(kps[i], bb, H)
+        p, src = ground_point(kps[i], bb, H, fr.get("center"))
         if p is not None:
             gp[i], gsrc[i] = p, src
         if bb is not None:
@@ -839,13 +852,13 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
             "bh_ref_px": bh,
             "bbox_truncated": bool(trunc[i]),
             # ground from a truncated bbox is the frame edge, not the feet
-            "reliable": bool(gsrc[i] == "ankles" or not trunc[i]),
+            "reliable": bool(gsrc[i] == "ankles" or (not trunc[i] and gsrc[i] != "center")),
             "on_floor": scene.inside(scene.floor, p) if p is not None else None,
             "inside_exit_idx": scene.inside_exit(p) if p is not None else None,
         }
 
         # pose
-        pf = pose_features(kps[i], bh, hd)
+        pf = pose_features(kps[i], bh, hd) if kps[i] is not None else dict(NO_POSE)
 
         # scene-relative
         def rel(seg, anchor):

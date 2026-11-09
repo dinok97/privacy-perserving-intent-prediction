@@ -67,8 +67,11 @@ causal. Use it to select features programmatically.
 }
 ```
 
-Frames where the person was not detected keep only `frame_index`, `t` and
-`detected: false`, so frame indices stay continuous.
+A frame is `detected` when the tracker saw the person: keypoints, a bounding
+box or a centre point. Pose is optional. Without keypoints the frame keeps
+`pos`, `kin` and `scene_rel` (from the bbox / centre), and every `pose` value
+is `null`. Frames where the person was not detected keep only `frame_index`, `t`
+and `detected: false`, so frame indices stay continuous.
 
 ## 3. Exits
 
@@ -116,10 +119,10 @@ So there are three automatic types:
 | field | meaning |
 |---|---|
 | `ground_px`, `ground_norm` | ground contact: mid-ankle, else bbox bottom (3-frame causal mean) |
-| `ground_src` | `ankles` or `bbox_bottom` |
+| `ground_src` | `ankles`, `bbox_bottom` (no ankles or no pose) or `center` (no bbox either) |
 | `bbox_h_px`, `bh_ref_px` | bbox height; reference body height used for `_bh` |
 | `bbox_truncated` | bbox touches the top/bottom of the frame |
-| `reliable` | false when the ground point comes from a truncated bbox |
+| `reliable` | false when the ground point comes from a truncated bbox or from `center` |
 | `on_floor` | ground point lies on the segmented floor |
 | `inside_exit_idx` | exit whose area contains the ground point |
 
