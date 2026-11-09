@@ -20,6 +20,9 @@ import sys
 import tempfile
 
 
+PREDICTION_FIELDS = ('depth', 'depth_conf', 'intrinsic', 'extrinsic')
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -59,12 +62,12 @@ def decode_video(video, directory):
                    'width': width, 'height': height, 'fps': fps, 'frame_count': count}
 
 
-def export_arrays(predictions, images, directory, count):
+def export_arrays(predictions, directory, count):
     """Validate the entire result before publishing any completion manifest."""
     import numpy as np
-    expected_ndim = {'depth': 5, 'depth_conf': 4, 'intrinsic': 4, 'extrinsic': 4, 'images': 5}
+    expected_ndim = dict(zip(PREDICTION_FIELDS, (5, 4, 4, 4)))
     arrays = {}
-    for key, value in {**predictions, 'images': images}.items():
+    for key, value in predictions.items():
         if key not in expected_ndim:
             continue
         if hasattr(value, 'detach'):
@@ -80,14 +83,12 @@ def export_arrays(predictions, images, directory, count):
         raise ValueError('Invalid depth dimensions')
     n, h, w, channels = depth.shape
     shapes = {'depth': (count, h, w, 1), 'depth_conf': (count, h, w),
-              'images': (count, 3, h, w), 'intrinsic': (count, 3, 3), 'extrinsic': (count, 3, 4)}
+              'intrinsic': (count, 3, 3), 'extrinsic': (count, 3, 4)}
     for key, value in arrays.items():
         if value.shape != shapes[key] or not np.isfinite(value).all():
             raise ValueError(f'Invalid {key} shape or nonfinite values: {value.shape}')
     if n != count or channels != 1 or not (depth > 0).all():
         raise ValueError('Every frame must have positive depth')
-    if arrays['images'].min() < 0 or arrays['images'].max() > 1:
-        raise ValueError('Preprocessed RGB must be in [0, 1]')
     k = arrays['intrinsic']
     r = arrays['extrinsic'][..., :3]
     if not ((k[:, 0, 0] > 0).all() and (k[:, 1, 1] > 0).all()):
@@ -131,9 +132,10 @@ def infer(args):
         dirty = bool(subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain', '--untracked-files=no'], text=True).strip())
     except (OSError, subprocess.CalledProcessError):
         revision, dirty = None, None
-    with tempfile.TemporaryDirectory(prefix='.lingbot-', dir=output) as temp:
+    with tempfile.TemporaryDirectory(prefix='.lingbot-', dir=output) as temp, \
+            tempfile.TemporaryDirectory(prefix='lingbot-frames-') as frames:
         temp = Path(temp)
-        paths, source = decode_video(video, temp)
+        paths, source = decode_video(video, Path(frames))
         images = load_and_preprocess_images(paths, mode='crop', image_size=518, patch_size=14)
         expected = (source['frame_count'], 3, round(source['height'] * 518 / source['width'] / 14) * 14, 518)
         if tuple(images.shape) != expected:
@@ -163,11 +165,12 @@ def infer(args):
         # which inverts poses for its viewer; our projection expects w2c.
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions['pose_enc'].float().cpu(), images.shape[-2:])
         predictions['extrinsic'], predictions['intrinsic'] = extrinsic, intrinsic
-        resolution = export_arrays(predictions, images, temp / video.stem, source['frame_count'])
+        resolution = export_arrays(predictions, temp / video.stem, source['frame_count'])
         if sha256(video) != source['sha256']:
             raise ValueError('Input video changed while inference was running')
         manifest = {'source': source, 'all_source_frames_processed': True,
-            'provider': {'name': 'lingbot-map', 'adapter_version': 1, 'repo': str(repo),
+            'prediction_fields': list(PREDICTION_FIELDS),
+            'provider': {'name': 'lingbot-map', 'adapter_version': 2, 'repo': str(repo),
                          'revision': revision, 'tracked_changes': dirty, 'checkpoint': str(checkpoint),
                          'checkpoint_sha256': checkpoint_hash, 'torch': str(torch.__version__),
                          'device': str(device), 'dtype': dtype_name, 'mode': 'streaming',

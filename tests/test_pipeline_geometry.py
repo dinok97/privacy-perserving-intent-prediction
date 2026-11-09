@@ -52,16 +52,25 @@ class DepthContracts(unittest.TestCase):
             geometry.ensure_depth_run('clip.mp4', self.info, self.root, self.root / 'work')
 
     def test_provider_is_argv_based_and_reused_after_success(self):
+        import numpy as np
+
         config = self.root / 'command.json'
         code = ("from pathlib import Path; import sys,numpy as np; p=Path(sys.argv[1]); "
                 "p.mkdir(parents=True,exist_ok=True); "
+                "(p/'source-frame.png').write_bytes(b'private'); "
                 "[np.savez_compressed(p/f'frame_{i:06d}.npz',depth=np.ones((14,14,1)),"
-                "depth_conf=np.ones((14,14)),images=np.zeros((3,14,14)),"
+                "depth_conf=np.ones((14,14)),images=np.zeros((3,14,14)),extra=np.ones(1),"
                 "intrinsic=np.eye(3),extrinsic=np.eye(4)[:3]) for i in range(2)]")
         geometry.save(config, {'command': [sys.executable, '-c', code, '{predictions}']})
         workspace = self.root / 'work with spaces'
         manifest = geometry.ensure_depth_run('clip.mp4', self.info, self.root / 'empty', workspace, config)
         self.assertEqual(geometry.load(manifest)['source'], self.info)
+        self.assertFalse(any(workspace.rglob('*.png')))
+        frames = sorted((manifest.parent / self.info['stem']).glob('*.npz'))
+        self.assertEqual(len(frames), 2)
+        for frame in frames:
+            with np.load(frame, allow_pickle=False) as archive:
+                self.assertEqual(set(archive.files), {'depth', 'depth_conf', 'intrinsic', 'extrinsic'})
         with patch.object(geometry.subprocess, 'run', side_effect=AssertionError('Provider rerun')):
             again = geometry.ensure_depth_run('clip.mp4', self.info, self.root / 'empty', workspace, config)
         self.assertEqual(again, manifest)
@@ -97,6 +106,33 @@ class PipelineCleanupContracts(unittest.TestCase):
 
     def test_missing_temporary_undistorted_results_directory_is_ok(self):
         pipeline.delete_undistorted_results(self.root)
+
+    def test_3d_run_rejects_legacy_output(self):
+        (self.root / 'old-clip' / 'geometry_3d').mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'fresh --output'):
+            pipeline.run_pipeline(output=self.root, with_3d=True)
+
+    def test_raw_3d_tracking_clips_are_private_even_on_failure(self):
+        source = self.root / 'source'
+        output = self.root / 'output'
+        source.mkdir()
+        (source / 'input.mp4').touch()
+        staging = []
+
+        def failed_tracker(videos, source_dir, tracks, manifest, *args):
+            staging.append(tracks.parent)
+            self.assertNotEqual(tracks.parent, output)
+            self.assertEqual(manifest.parent, tracks.parent)
+            tracks.mkdir()
+            (tracks / 'clip.mp4').write_bytes(b'private clip')
+            raise RuntimeError('Tracking failed')
+
+        with patch.object(pipeline, 'run_trajectory_tracker', side_effect=failed_tracker):
+            with self.assertLogs('pipeline', level='ERROR'), self.assertRaisesRegex(RuntimeError, 'Tracking failed'):
+                pipeline.run_pipeline(source_dir=source, output=output, with_3d=True, skip_undistort=True)
+        self.assertEqual(len(staging), 1)
+        self.assertFalse(staging[0].exists())
+        self.assertFalse(any(output.rglob('*.mp4')))
 
 
 class JoinContracts(unittest.TestCase):
@@ -184,10 +220,13 @@ class TrackingAdapter(unittest.TestCase):
 
     def test_cached_adapter_does_not_decode_or_load_keypoints_again(self):
         path = self.adapt()
-        timestamp = (path.parent / 'yolo_tracking.mp4').stat().st_mtime_ns
+        detections = path.parent / 'detections.json'
+        timestamp = detections.stat().st_mtime_ns
         again = self.adapt(Mock(side_effect=AssertionError('Keypoints reloaded')))
         self.assertEqual(again, path)
-        self.assertEqual((path.parent / 'yolo_tracking.mp4').stat().st_mtime_ns, timestamp)
+        self.assertEqual(detections.stat().st_mtime_ns, timestamp)
+        self.assertFalse((path.parent / 'yolo_tracking.mp4').exists())
+        self.assertFalse((path.parent / 'yolo_frames').exists())
 
     def test_mismatched_dimensions_rejected(self):
         self.source['frame_width'] = 640

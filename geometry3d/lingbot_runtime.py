@@ -101,10 +101,8 @@ def run(config, config_path, video, output, log):
     uid, gid = remote(['id', '-u'], capture=True), remote(['id', '-g'], capture=True)
     if not uid.isdecimal() or not gid.isdecimal():
         raise ValueError('Cannot determine remote Docker user')
-    remote(['mkdir', '-p', str(job)])
+    remote(['mkdir', '-p', '-m', '700', str(job)])
     subprocess.run([*scp, str(ADAPTER), f'{scp_host}:{job}/lingbot_inference.py'],
-                   check=True, stdout=log, stderr=subprocess.STDOUT)
-    subprocess.run([*scp, str(video), f'{scp_host}:{job}/{video.name}'],
                    check=True, stdout=log, stderr=subprocess.STDOUT)
     command = ['docker', 'run', '--rm', '--shm-size=8g', '--user', f'{uid}:{gid}',
                '-e', 'HOME=/tmp', '-e', 'PYTHONDONTWRITEBYTECODE=1',
@@ -115,7 +113,13 @@ def run(config, config_path, video, output, log):
         command.extend(['--gpus', 'all'])
     command.extend([image, 'python', '/job/lingbot_inference.py',
                     *adapter_args(config, '/lingbot', '/model/weights.pt', '/job/' + video.name, '/job/output')])
-    remote(command)
+    remote_video = job / video.name
+    try:
+        subprocess.run([*scp, str(video), f'{scp_host}:{remote_video}'],
+                       check=True, stdout=log, stderr=subprocess.STDOUT)
+        remote(command)
+    finally:
+        remote(['rm', '-f', '--', str(remote_video)])
     # Download into an empty staging folder; never accept a partial scp as a run.
     import tempfile
     with tempfile.TemporaryDirectory(prefix='.download-', dir=output) as temp:

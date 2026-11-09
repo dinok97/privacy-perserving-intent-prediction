@@ -153,18 +153,15 @@ def write_ply(path, world, colours, classes, instances, uv):
         stream.write(vertices.tobytes())
 
 
-def render_previews(out, stem, rgb, classes, world, stable):
+def render_previews(out, stem, depth, classes, world, stable):
     coloured = COLOURS[classes]
-    overlay = rgb.copy()
-    labelled = classes > 0
-    overlay[labelled] = np.rint(0.52 * rgb[labelled] + 0.48 * coloured[labelled]).astype(np.uint8)
     Image.fromarray(coloured).save(out / 'aligned_label_colours.png')
-    Image.fromarray(overlay).save(out / 'aligned_segmentation_overlay.png')
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.6), layout='constrained')
-    for ax, image, title in zip(axes, [rgb, overlay, coloured],
-                              ['Median RGB on depth grid', 'Matched segmentation overlay', 'Semantic label map']):
-        ax.imshow(image)
-        ax.set_title(title)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.6), layout='constrained')
+    axes[0].imshow(depth, cmap='turbo')
+    axes[0].set_title('Median depth')
+    axes[1].imshow(coloured)
+    axes[1].set_title('Matched semantic label map')
+    for ax in axes:
         ax.set_axis_off()
     fig.suptitle(f'{stem}: matched pixels ({classes.shape[1]} x {classes.shape[0]})', fontsize=13)
     fig.legend(handles=[Patch(facecolor=COLOURS[i] / 255, label=NAMES[i])
@@ -203,7 +200,7 @@ def render_previews(out, stem, rgb, classes, world, stable):
     plt.close(fig)
 
 
-def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, source_scene,
+def write_viewer(out, stem, world, classes, instances, stable, depth, source_scene,
                  *, allow_undistorted=False):
     # process_scene is also called directly by the integrated pipeline, without
     # the gallery CLI that normally creates this shared offline dependency.
@@ -218,15 +215,11 @@ def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, sourc
     sampling = (x % 2 == 0) & (y % 2 == 0)
     keep = sampling & stable & np.isfinite(world).all(axis=-1)
     figure = go.Figure()
-    semantic_colours, rgb_colours = [], []
     for i in np.unique(classes[keep]):
         region = keep & (classes == i)
         p = world[region]
         custom = np.column_stack([x[region], y[region], depth[region], instances[region]])
         semantic = f'rgb({COLOURS[i,0]},{COLOURS[i,1]},{COLOURS[i,2]})'
-        original = [f'rgb({r},{g},{b})' for r, g, b in rgb[region]]
-        semantic_colours.append(semantic)
-        rgb_colours.append(original)
         figure.add_trace(go.Scatter3d(
             x=p[:, 0], y=p[:, 2], z=-p[:, 1], mode='markers', name=NAMES[i],
             marker={'size': 2.0, 'color': semantic, 'opacity': 1 if i else 0.25},
@@ -245,13 +238,6 @@ def write_viewer(out, stem, world, rgb, classes, instances, stable, depth, sourc
         scene=scene, template='plotly_white', height=780,
         margin={'l': 10, 'r': 10, 'b': 95, 't': 105}, uirevision=stem,
         legend={'title': {'text': 'Click a class to hide/show'}},
-        updatemenus=[{
-            'type': 'buttons', 'direction': 'left', 'x': 0, 'y': 1.06,
-            'buttons': [
-                {'label': 'Semantic colours', 'method': 'restyle', 'args': [{'marker.color': semantic_colours}]},
-                {'label': 'Original RGB', 'method': 'restyle', 'args': [{'marker.color': rgb_colours}]},
-            ],
-        }],
         annotations=[{'text': 'Drag to rotate; scroll to zoom; hover for pixel and depth.<br>'
                       'Only temporally stable pixels are shown.<br>Floor is not calibrated to gravity.',
                       'xref': 'paper', 'yref': 'paper', 'x': 0.5, 'y': -0.07,
@@ -305,8 +291,8 @@ h2{font-size:18px}p{line-height:1.5}.legend{display:flex;gap:16px;flex-wrap:wrap
 <div class="images"><div><h2>Original segmentation (SOURCE_SIZE)</h2>
 <p>Existing polygon labels on their original image grid.</p>
 <img src="original_2d_segmentation.png" alt="Original 2D segmentation label map"></div>
-<div><h2>Matched overlay (DEPTH_SIZE)</h2><p>The labels used for the 3D projection, over the median background image.</p>
-<img src="aligned_segmentation_overlay.png" alt="Segmentation aligned with the depth image"></div></div>
+<div><h2>Matched segmentation (DEPTH_SIZE)</h2><p>The labels used for the 3D projection.</p>
+<img src="aligned_label_colours.png" alt="Segmentation aligned with the depth image"></div></div>
 <div class="legend">LEGEND</div></section>
 <section id="panel-depth" role="tabpanel" aria-labelledby="tab-depth" hidden>
 <p>Hover to read each pixel’s depth. This shows the full median depth map; the 3D scene uses only stable pixels.
@@ -340,7 +326,6 @@ def process_scene(path, depth_root, output_root, *, video_stem=None, allow_undis
     depth = np.load(background_folder / 'background_depth.npy', allow_pickle=False)
     with np.load(background_folder / 'background_depth.npz', allow_pickle=False) as data:
         stable = data['stable_mask'].astype(bool)
-    rgb = np.asarray(Image.open(background_folder / 'background_rgb_reference.png').convert('RGB'))
     height, width = depth.shape
     source_width, source_height = scene['image_size']
     expected_height = round(source_height * (518 / source_width) / 14) * 14
@@ -360,12 +345,13 @@ def process_scene(path, depth_root, output_root, *, video_stem=None, allow_undis
     y, x = np.indices(depth.shape)
     out = output_root / stem
     out.mkdir(parents=True, exist_ok=True)
+    (out / 'aligned_segmentation_overlay.png').unlink(missing_ok=True)
     np.save(out / 'aligned_label_map.npy', classes, allow_pickle=False)
     np.save(out / 'aligned_instance_map.npy', instances, allow_pickle=False)
     np.savez_compressed(
         out / 'segmented_background.npz', depth=depth, class_id=classes,
         instance_id=instances, stable_mask=stable.astype(np.uint8),
-        xyz_camera=camera, xyz_world=world, rgb=rgb,
+        xyz_camera=camera, xyz_world=world,
         intrinsic=intrinsic, reference_extrinsic=extrinsic,
     )
     (out / 'aligned_scene.json').write_text(json.dumps(aligned, indent=2) + '\n', encoding='utf-8')
@@ -385,8 +371,8 @@ def process_scene(path, depth_root, output_root, *, video_stem=None, allow_undis
     glb_transform = np.diag([1, -1, -1, 1])
     cloud_scene.apply_transform(glb_transform)
     cloud_scene.export(out / 'segmented_background.glb')
-    render_previews(out, stem, rgb, classes, world, keep)
-    viewer_points = write_viewer(out, stem, world, rgb, classes, instances, keep, depth, scene,
+    render_previews(out, stem, depth, classes, world, keep)
+    viewer_points = write_viewer(out, stem, world, classes, instances, keep, depth, scene,
                                   allow_undistorted=allow_undistorted)
 
     # Independently reload both 3D exports and verify all points survived export.
@@ -476,7 +462,7 @@ def write_index(output, results):
         'aligned_label_map.npy / aligned_label_ids.png: one class ID per matched depth pixel.\n'
         'aligned_instance_map.npy: original JSON object IDs (1-based; 0=unlabelled).\n'
         'aligned_scene.json: transformed polygons and exact image-grid mapping metadata.\n'
-        'segmented_background.npz: full-grid labels, median depth, RGB, camera/world XYZ and cameras.\n'
+        'segmented_background.npz: full-grid labels, median depth, camera/world XYZ and cameras.\n'
         'segmented_background.ply: full-resolution stable cloud with class/object IDs and matched pixel coordinates.\n'
         'segmented_background.glb: stable semantic-colour scene, separate named nodes per class.\n'
         'viewer.html: interactive offline 3D viewer (needs ../plotly.min.js alongside its parent index).\n'
