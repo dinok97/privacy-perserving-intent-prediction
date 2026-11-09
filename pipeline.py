@@ -284,19 +284,23 @@ def list_videos(folder):
 
 # ----------------------------------------------------------------------------- stages
 
-def run_fisheye_corrector(videos, source_dir, progress):
+def run_fisheye_corrector(videos, progress, failures, fail_fast=False):
+    """Undistorts each video into [TEMP]_undistorted_results (emptied first). Returns the videos to track.
+
+    A failing video is added to failures and skipped (unless fail_fast)."""
     from processing import fisheye_correction
     for video in videos:
         logger.debug('  input: %s', video)
-    call_with_progress(fisheye_correction.correct_videos, progress, videos)
-    return Path(source_dir) / '[TEMP]_undistorted_results'
+    return call_with_progress(fisheye_correction.correct_videos, progress, videos, failures=failures, fail_fast=fail_fast)
 
 
-def run_trajectory_tracker(source_dir, output, manifest, device, progress):
+def run_trajectory_tracker(videos, source_dir, output, manifest, device, progress, failures, fail_fast=False):
+    """Tracks exactly the given videos. A failing video is added to failures and skipped (unless fail_fast)."""
     from processing import video_processor
-    logger.debug('Tracking videos from %s on device=%s', source_dir, device)
+    logger.debug('Tracking %d video(s) on device=%s', len(videos), device)
     result = call_with_progress(video_processor.run, progress, source_dir=source_dir, output_root=output,
-                                processed_manifest=manifest, device=device)
+                                processed_manifest=manifest, device=device, failures=failures, fail_fast=fail_fast,
+                                videos=videos)
     if not Path(manifest).is_file():
         raise FileNotFoundError(f'Tracker finished but wrote no manifest: {manifest}')
     if not geometry.load(manifest):
@@ -327,7 +331,10 @@ def run_background_extractor(records, progress, fail_fast=False):
                 import cv2
                 logger.debug('%s: extracting median background', video.name)
                 background.parent.mkdir(parents=True, exist_ok=True)
-                image = background_extraction.median_background(video)
+                image, report = background_extraction.median_background(video)
+                if report['people_left']:
+                    logger.warning('%s: %d person(s) still visible in the background, %s', video.name,
+                                   report['people_left'], 'pixelated' if background_extraction.ON_PERSON_FOUND == 'pixelate' else 'kept')
                 if not cv2.imwrite(str(background), image):
                     raise OSError(f'Could not save background {background}')
             if not scene.is_file():
@@ -457,18 +464,21 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
     t_start = time.perf_counter()
     try:
         if processed_manifest is None:
+            videos = list_videos(source_dir)
+            if not videos:
+                raise ValueError(f'No input videos found in {source_dir}')
             if skip_undistort:
                 logger.info('Fisheye correction - skipped (--skip-undistort)')
-                input_dir = source_dir
+                tracked = videos  # tracked straight from the input folder; no temp folder
             else:
-                videos = list_videos(source_dir)
-                if not videos:
-                    raise ValueError(f'No input videos found in {source_dir}')
                 with stage('Fisheye correction', len(videos)) as progress:
-                    input_dir = run_fisheye_corrector(videos, source_dir, progress)
+                    tracked = run_fisheye_corrector(videos, progress, summary['failed_clips'], fail_fast)
+                if not tracked:
+                    raise RuntimeError('Fisheye correction failed for every input video')
             processed_manifest = output / 'processed_video_paths.json'
-            with stage('Trajectory tracking', len(list_videos(input_dir))) as progress:
-                run_trajectory_tracker(input_dir, output / 'tracks', processed_manifest, device, progress)
+            with stage('Trajectory tracking', len(tracked)) as progress:
+                run_trajectory_tracker(tracked, source_dir, output / 'tracks', processed_manifest, device, progress,
+                                       summary['failed_clips'], fail_fast)
         summary['processed_manifest'] = str(Path(processed_manifest).resolve())
 
         with stage('Loading clip records') as progress:
@@ -514,8 +524,8 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                     continue
                 progress()
 
-        summary['failed_clips'] = [{'video': str(r['video']), 'stage': r['failed_stage'], 'error': r['error']}
-                                   for r in records if 'error' in r]
+        summary['failed_clips'] += [{'video': str(r['video']), 'stage': r['failed_stage'], 'error': r['error']}
+                                    for r in records if 'error' in r]
         if not summary['clips']:
             raise RuntimeError('No clip was processed successfully; see the log for each clip')
 

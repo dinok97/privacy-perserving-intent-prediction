@@ -219,7 +219,7 @@ class TrackerClock(unittest.TestCase):
         self.assertEqual(cfg.output_root, 'outputs')
         self.assertEqual(cfg.processed_manifest, 'outputs/clips.json')
         self.assertEqual(result, ['/saved/clip.mp4'])
-        collector.run.assert_called_once_with(display=False)
+        collector.run.assert_called_once_with(display=False, on_progress=None, failures=None, fail_fast=False)
 
     def test_offline_tracking_uses_video_time_not_processing_time(self):
         import cv2
