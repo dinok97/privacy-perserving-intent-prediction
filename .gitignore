@@ -5,6 +5,7 @@
 /reports/
 /tmp/
 /bak/
+/validation_report/
 # Existing checkouts may still contain private assets under the old layout.
 /video_processing/
 /source/*.png
