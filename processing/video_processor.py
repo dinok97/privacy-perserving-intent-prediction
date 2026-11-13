@@ -2,50 +2,39 @@
 """
 video_processor.py
 
-Turn clips (video files) into labeled clips of people entering, passing or exiting a doorway.
+Track the people in each input video and label each of them enter / pass / exit.
 
-Read clips from `../source` and put the results into `../data`.
+Nothing is clipped and no video is written. For every tracked person the input
+video produces two files:
+  * <name>.json       the trajectory: per frame the center, bounding box and the
+                      17 keypoints, plus the label and some metadata;
+  * <name>_pose.json  the skeleton as normalized, named landmarks.
 
-Each clip is processed to detect and track people, then produce 4 outputs:
-  * a per-frame trajectory: center point, bounding box and the 17 keypoints;
-  * the matching clip file itself (.mp4);
-  * a JSON file with the trajectory and some metadata;
-  * a "<name>_pose.json" sidecar with the skeleton as normalized, named landmarks.
+Each JSON covers the WHOLE input video: frame_index 0 is the first frame of the
+input video and t = frame_index / fps. Frames where the person is not visible
+have center/bbox/keypoints = null. The video the frames belong to is the input
+video itself; its sha256 is stored as meta.clip_video_sha256.
 
-Each finished clip is labelled enter / pass / exit. All clips of one day go into
-one flat folder; the label and cleaning result are stored inside each clip's JSON
-and in clips.csv. Clips that look unusable are not deleted, only marked
-cleaning_result="removed", so nothing is lost.
+<name> is the input video's filename stem, with _2, _3, ... when one video has
+several people.
 
-How to run
-----------
-  Set the options in main() at the bottom of this file, then just run the script
-    (press Run in your editor, or `python video_processor.py`) -- no
-  command-line arguments needed.
-
-  Useful settings in main():
-    save_clips=True    -> record and save clips (default)
-    save_clips=False   -> track + label + show, but write nothing (monitor / setup)
-    print_labels=True  -> print a line each time a person is labeled enter/pass/exit
-    headless=True      -> no window (headless processing; stop with Ctrl+C)
-        model="..."        -> a local YOLO pose .pt model
-        source_dir="..."  -> process every supported video in this directory
-        source_video="..."-> process only this specific video
+Tracks that look unusable (too short, too few points, a partial person at the
+bottom edge) are not deleted, only marked cleaning_result="removed"; they stay
+out of the processed manifest that pipeline.py reads.
 
 Output is written under ../data:
   data/2026-05-29/
-    <name>.mp4  <name>.json  <name>_pose.json     one set per clip
-    <name>.part.mp4                               clip still being written (or left by a crash)
-    clips.csv                                     one row per clip: label, cleaning result, files
-    session_<date>_<time>.json                    one metadata file per recording session
+    <name>.json  <name>_pose.json      one pair per tracked person
+    clips.csv                          one row per person: label, cleaning result, files
+    session_<date>_<time>.json         one metadata file per run
 
-Only clips with cleaning_result="keep" go into the processed manifest used by
-pipeline.py; removed clips stay on disk and in clips.csv. Set manual_label in
-clips.csv to correct a label by hand - it is kept when the same clip is reprocessed.
+Set manual_label in clips.csv to correct a label by hand - it is kept when the
+same video is processed again.
 
-Output clips and JSON files use the original source video filename stem. If a
-source video contains multiple tracked people, later clips receive _2, _3, ...
-to avoid overwriting the first clip.
+How to run
+----------
+  Set the options in run() at the bottom of this file, then just run the script
+  (`python video_processor.py`). No command-line arguments are needed.
 """
 from __future__ import annotations
 
@@ -57,15 +46,15 @@ import math
 import os
 import platform
 import subprocess
-import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Optional
 
-# cv2, numpy and ultralytics are imported inside LivePoseCollector so the file
-# can be imported (e.g. to reuse the JSON helpers) without those heavy packages.
+# cv2 and ultralytics are imported inside LivePoseCollector so the file can be
+# imported (e.g. to reuse the JSON helpers) without those heavy packages.
 
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "3.0"  # 3.0: frames cover the whole input video, no clip video
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v"}
 
 
 def file_sha256(path):
@@ -75,20 +64,13 @@ def file_sha256(path):
             digest.update(chunk)
     return digest.hexdigest()
 
+
 # COCO-17 keypoint order produced by Ultralytics YOLO pose models.
 COCO_KEYPOINT_NAMES = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
     "left_wrist", "right_wrist", "left_hip", "right_hip",
     "left_knee", "right_knee", "left_ankle", "right_ankle",
-]
-
-# Skeleton edges (index pairs) used only for drawing the live overlay.
-COCO_SKELETON = [
-    (0, 1), (0, 2), (1, 3), (2, 4),            # head
-    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),   # arms
-    (5, 11), (6, 12), (11, 12),                # torso
-    (11, 13), (13, 15), (12, 14), (14, 16),    # legs
 ]
 
 # The pose sidecar stores a named, normalized subset of the COCO-17 keypoints.
@@ -111,12 +93,6 @@ SIDECAR_LANDMARK_TO_COCO = {
     "right_ankle":     16,
 }
 
-# Jetson camera intrinsics (this pipeline runs on the Jetson only).
-CAMERA_MTX = [[307.8047385, 0.0, 355.19676862],
-              [0.0, 302.44366762, 233.22849986],
-              [0.0, 0.0, 1.0]]
-CAMERA_DIST = [-0.290496, 0.07539763, -0.00075077, -0.00159761, -0.00811828]
-
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -130,29 +106,24 @@ class CollectorConfig:
     conf: float = 0.3
     imgsz: int = 640
 
-    # Camera / geometry
-    camera_index: int = 0
+    # Input videos
     source_dir: str = "source"       # video files are read from this directory
-    source_video: Optional[str] = None  # optional specific video; otherwise first file in source_dir
+    source_video: Optional[str] = None  # optional specific video; otherwise every video in source_dir
     source_videos: Optional[list] = None  # explicit list of videos to process (overrides source_dir scanning)
     processed_manifest: Optional[str] = None  # explicit manifest path for pipeline orchestration
-    distort: bool = False            # False -> no calibration; True -> use CAMERA_MTX/CAMERA_DIST
     ellipse_axes: tuple[int, int] = (480, 130)   # door entrance region
 
-    # Recording
-    save_clips: bool = True              # False -> track/label/show but write nothing (monitor mode)
+    # Output
     output_root: str = "data"
-    record_fps: Optional[float] = None   # mp4 encode fps; None -> use the source's reported fps
     write_pose_sidecar: bool = True      # also write the <name>_pose.json sidecar
     session_note: str = ""               # free text saved in metadata (lighting, location, ...)
 
     # Track lifecycle
     grace_frames: int = 15           # frames a track may be missing before it counts as gone
-    tail_seconds: float = 1.0        # extra seconds recorded after a track is gone (clip tail)
-    reentry_jump_frac: float = 0.45  # a recycled id reappearing farther than this -> new clip
-    min_duration_s: float = 0.5      # clips shorter than this go to removed/too_short
+    reentry_jump_frac: float = 0.45  # a recycled id reappearing farther than this -> new person
+    min_duration_s: float = 0.5      # tracks shorter than this are removed (too short)
 
-    # Thresholds for sorting each finished clip into enter / pass / exit / removed.
+    # Thresholds for labelling each track enter / pass / exit, or removing it.
     exit_start_y_min_norm: float = 0.68
     exit_min_delta_dist_norm: float = 0.10
     exit_min_end_farther_ratio: float = 1.10
@@ -162,17 +133,7 @@ class CollectorConfig:
     bottom_presence_max_y_span_norm: float = 0.26
     bottom_presence_min_bottom_touch_ratio: float = 0.45
 
-    # Camera capture (USB). 640x480 matches the calibration and the training data.
-    cap_width: int = 640
-    cap_height: int = 480
-    mjpg: bool = False               # request MJPG from the camera (often unlocks 30 fps)
-
-    # UI
-    fullscreen: bool = False
-    headless: bool = False           # record without a window (screenless Jetson)
     print_labels: bool = True        # print a line each time a person is labeled enter/pass/exit
-    status_every_s: float = 10.0     # print a one-line status heartbeat this often
-    debug: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -238,12 +199,14 @@ def classify_trajectory(frames: list[dict],
                         min_frames: int,
                         cfg: CollectorConfig) -> tuple[str, str, str]:
     """
-    Decide what a finished trajectory is and where it should go.
+    Decide what a track is: its label, and whether it is usable.
+
+    frames are the track's own frames, from its first to its last detection.
 
     Returns (label, result, reason):
       label  in {"enter", "pass", "exit"}     - the class
       result in {"keep", "removed"}           - usable or not; the class is only in label
-      reason - a short string for the metadata / subfolder name
+      reason - a short string for the metadata
 
     Checks run in order: length, then too-few-points, then exit, then a
     near-camera "partial person" case, otherwise keep.
@@ -341,7 +304,7 @@ def build_sample_json(*, track_id: int, label: str, result: str, reason: str,
                       door: tuple[float, float], axes: tuple[int, int],
                       frames: list[dict], meta: dict[str, Any]) -> dict[str, Any]:
     """
-    Build the per-clip JSON. The top-level keys (label, fps, frame_width,
+    Build the per-person JSON. The top-level keys (label, fps, frame_width,
     frame_height, door_center, frames) describe the trajectory; the rest of the
     detail sits under "meta".
     """
@@ -424,9 +387,14 @@ def _git_commit(cwd: Path) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Live collector
+# Tracker
 # ---------------------------------------------------------------------------
 class LivePoseCollector:
+    """Tracks the people in each input video and writes their JSON files.
+
+    (The name is kept from the old live recorder: geometry3d/track_single_video.py
+    imports this class for _extract_detections.)"""
+
     def __init__(self, cfg: CollectorConfig):
         self.cfg = cfg
 
@@ -436,20 +404,14 @@ class LivePoseCollector:
         import ultralytics  # noqa
         from ultralytics import YOLO  # noqa
         self.cv2 = cv2
-        self.np = np
 
         self.session_start = datetime.datetime.now()
         self.date_str = date_stamp(self.session_start)
         self.sess_str = session_stamp(self.session_start)
+        self.session_id = f"{self.date_str}_{self.sess_str}"
 
-        root = Path(cfg.output_root)
-        self.date_dir = root / self.date_str
-        if cfg.save_clips:
-            self.date_dir.mkdir(parents=True, exist_ok=True)
-
-        # Calibration
-        self.mtx = np.array(CAMERA_MTX)
-        self.dist = np.array(CAMERA_DIST)
+        self.date_dir = Path(cfg.output_root) / self.date_str
+        self.date_dir.mkdir(parents=True, exist_ok=True)
 
         # Software versions / commit, recorded in the metadata.
         self.versions = {
@@ -463,247 +425,124 @@ class LivePoseCollector:
         print(f"[INIT] Loading model: {cfg.model}")
         self.model = YOLO(cfg.model)
 
-        # Runtime state (geometry is set per source by _init_geometry).
-        self.cap = None
-        self.apply_undistort = True
-        self.frame_width = self.frame_height = 0
-        self.clean_width = self.clean_height = 0
+        # Per-video geometry (set by _run_source).
+        self.width = self.height = 0
+        self.fps = 0.0
         self.door = (0, 0)
         self.axes = cfg.ellipse_axes
-        self.record_fps = float(cfg.record_fps) if cfg.record_fps else 0.0
         self.min_frames = 2
-        self.tail_frames = 0
 
-        self.active: dict[int, dict] = {}   # track_id -> recording state
-        self.current_source_stem = "source"
+        self.active: dict[int, dict] = {}   # track_id -> track being followed
+        self.finished: list[dict] = []      # tracks of the current video that have ended
         self.source_clip_counts: dict[str, int] = {}
-        self.seq = 0                        # clip counter for the whole session
-        self.processed_video_paths: list[str] = []   # kept clips only -> pipeline manifest
-        self.clip_rows: list[dict] = []               # all clips -> clips.csv
+        self.current_source_stem = "source"
+        self.seq = 0                        # person counter for the whole session
+        self.processed_records: list[dict] = []   # kept tracks only -> pipeline manifest
+        self.clip_rows: list[dict] = []           # all tracks -> clips.csv
         self.counts = {"enter": 0, "pass": 0, "exit": 0, "removed": 0}
         self.reason_counts: dict[str, int] = {}
 
-        self._fps = 0
-        self._fps_frames = 0
-        self._fps_t0 = time.time()
-        self._status_t0 = time.time()
-        self._stage_ms = {"read": 0.0, "undistort": 0.0, "track+proc": 0.0, "draw": 0.0}
-        self._stage_n = 0
-        self._first_shape = None
-
-        if cfg.save_clips:
-            print(f"[INIT] output: {self.date_dir}  session: {self.sess_str}  "
-                  f"sidecar: {'on' if cfg.write_pose_sidecar else 'off'}")
-        else:
-            print("[INIT] MONITOR mode (save_clips=False) - tracking/labeling only, nothing written.")
-
-    def _init_geometry(self, width: int, height: int, reported_fps: float,
-                       apply_undistort: bool = True, for_writing: bool = True):
-        """Set the clean frame size, the door position and the recording fps."""
-        cv2 = self.cv2
-        self.frame_width, self.frame_height = int(width), int(height)
-        self.apply_undistort = apply_undistort
-
-        if apply_undistort and self.cfg.distort:
-            self.newmtx, self.roi = cv2.getOptimalNewCameraMatrix(
-                self.mtx, self.dist, (self.frame_width, self.frame_height), 1,
-                (self.frame_width, self.frame_height))
-            self.map1, self.map2 = cv2.initUndistortRectifyMap(
-                self.mtx, self.dist, None, self.newmtx,
-                (self.frame_width, self.frame_height), cv2.CV_16SC2)  # fixed-point maps: faster remap
-            self.clean_width, self.clean_height = self.roi[2], self.roi[3]
-            mode = "remap+crop"
-        elif apply_undistort:
-            # Precompute the undistort maps once (same result as cv2.undistort,
-            # but remap per frame is far cheaper than recomputing the map each call).
-            self.map1, self.map2 = cv2.initUndistortRectifyMap(
-                self.mtx, self.dist, None, self.mtx,
-                (self.frame_width, self.frame_height), cv2.CV_16SC2)  # fixed-point maps: faster remap
-            self.clean_width, self.clean_height = self.frame_width, self.frame_height
-            mode = "undistort (remap)"
-        else:
-            self.clean_width, self.clean_height = self.frame_width, self.frame_height
-            mode = "none"
-
-        # Door at the bottom-center of the frame (h-1 = bottom row).
-        self.door = (self.clean_width // 2, self.clean_height - 1)
-        self.axes = self.cfg.ellipse_axes
-
-        # Encode fps. Required when saving (to encode the mp4); when not saving it
-        # is only informational. No guessed fallback: use record_fps if set, else
-        # the rate the camera reports.
-        if self.cfg.record_fps and self.cfg.record_fps > 0:
-            self.record_fps = float(self.cfg.record_fps)
-            fps_origin = "record_fps"
-        elif reported_fps and reported_fps > 0:
-            self.record_fps = float(reported_fps)
-            fps_origin = "camera-reported"
-        elif not for_writing:
-            self.record_fps = 0.0
-            fps_origin = "unknown (not saving)"
-        else:
-            raise RuntimeError(
-                "The camera reported no usable FPS and record_fps was not set. "
-                "Set record_fps in CollectorConfig so the recorder encodes at the "
-                "real capture rate (this script never falls back to a guessed fps).")
-
-        if self.record_fps > 0:
-            self.min_frames = max(2, int(round(self.cfg.min_duration_s * self.record_fps)))
-            self.tail_frames = max(0, int(round(self.cfg.tail_seconds * self.record_fps)))
-        else:
-            self.min_frames = 2
-            self.tail_frames = 0
-
-        note = "" if for_writing else "  (not saving)"
-        print(f"[GEOM] frame={self.clean_width}x{self.clean_height} "
-              f"record_fps={self.record_fps:.3f} ({fps_origin}) min_frames={self.min_frames} "
-              f"grace={self.cfg.grace_frames} tail={self.tail_frames} undistort={mode}{note}")
+        print(f"[INIT] output: {self.date_dir}  session: {self.sess_str}  "
+              f"sidecar: {'on' if cfg.write_pose_sidecar else 'off'}")
 
     # -- per-track lifecycle -------------------------------------------------
-    def _start_track(self, track_id: int, t_clip0: float):
-        cv2 = self.cv2
+    def _start_track(self, track_id: int):
         self.source_clip_counts[self.current_source_stem] += 1
-        source_occurrence = self.source_clip_counts[self.current_source_stem]
-        base = clip_basename(self.current_source_stem, source_occurrence)
-        if self.cfg.save_clips:
-            # written as <name>.part.mp4 and renamed when the clip is finished, so a
-            # crash never leaves a half-written file that looks like a real clip.
-            # The name must END in .mp4: OpenCV picks the container from the
-            # extension and silently writes nothing for an unknown one like ".part".
-            temp_path = self.date_dir / f"{base}.part.mp4"
-            writer = cv2.VideoWriter(
-                str(temp_path), cv2.VideoWriter_fourcc(*"mp4v"),
-                self.record_fps, (self.clean_width, self.clean_height))
-            if not writer.isOpened():
-                print(f"[WARN] could not open a video writer for {temp_path.name}; "
-                      "this clip will be removed as mp4_unreadable_or_corrupt")
-        else:
-            temp_path = None
-            writer = None
+        occurrence = self.source_clip_counts[self.current_source_stem]
         self.active[track_id] = {
-            "writer": writer,
-            "temp_path": temp_path,
-            "frames": [],
+            "track_id": track_id,
+            "base": clip_basename(self.current_source_stem, occurrence),
+            "detections": {},     # frame_index -> (center, bbox, keypoints)
             "vanish": 0,
             "last_center": None,
-            "t0": t_clip0,
-            "wall_start": datetime.datetime.now().isoformat(timespec="seconds"),
-            "source_stem": self.current_source_stem,
-            "source_occurrence": source_occurrence,
-            "base": base,
         }
-        if self.cfg.debug:
-            print(f"[START] id={track_id} -> {temp_path.name}")
 
-    def _append_frame(self, track_id: int, t_now: float, center, bbox, keypoints):
-        rec = self.active[track_id]
-        rec["frames"].append({
-            "frame_index": len(rec["frames"]),
-            "t": round(t_now - rec["t0"], 4),
-            "center": center,
-            "bbox": bbox,
-            "keypoints": keypoints,
-        })
-        if center is not None:
-            rec["last_center"] = center
+    def _end_track(self, track_id: int):
+        self.finished.append(self.active.pop(track_id))
 
-    def _finalize_track(self, track_id: int):
+    def _write_track(self, rec: dict, source: Path, n_frames: int, video_sha256: str):
+        """Label one finished track and write its JSON files over the whole video."""
         cfg = self.cfg
-        rec = self.active.pop(track_id)
-        if rec["writer"] is not None:
-            rec["writer"].release()
-        frames = rec["frames"]
+        detections = rec["detections"]
+        first, last = min(detections), max(detections)
 
-        # Effective fps measured from the per-frame timestamps (the real achieved
-        # rate, written as the top-level "fps"). No fallback: a one-frame clip that
-        # cannot be measured (and is removed anyway) gets null.
-        span = frames[-1]["t"] if frames else 0.0
-        eff_fps = (len(frames) - 1) / span if span > 1e-6 else None
+        def frame(i):
+            center, bbox, kpts = detections.get(i, (None, None, None))
+            return {"frame_index": i, "t": round(i / self.fps, 4),
+                    "center": center, "bbox": bbox, "keypoints": kpts}
 
-        # When saving, a clip whose mp4 was never written is treated as corrupt.
-        corrupt = False
-        if cfg.save_clips and rec["temp_path"] is not None:
-            corrupt = (not rec["temp_path"].exists()) or rec["temp_path"].stat().st_size < 1024
-        if corrupt:
-            label, result, reason = "pass", "removed", "mp4_unreadable_or_corrupt"
-        else:
-            label, result, reason = classify_trajectory(
-                frames, self.door, self.axes,
-                self.clean_width, self.clean_height,
-                self.min_frames, cfg)
+        # Label from the track's own span; the JSON covers the whole input video.
+        label, result, reason = classify_trajectory(
+            [frame(i) for i in range(first, last + 1)], self.door, self.axes,
+            self.width, self.height, self.min_frames, cfg)
+        frames = [frame(i) for i in range(n_frames)]
 
         self.seq += 1
         n_kpts = sum(1 for f in frames if f.get("keypoints"))
+        pts = valid_centers(frames)
+        base = rec["base"]
+        meta = {
+            "schema_version": SCHEMA_VERSION,
+            "session_id": self.session_id,
+            "created_utc": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "track_start_frame": first,
+            "track_end_frame": last,
+            "duration_s": round((last - first) / self.fps, 3),
+            "effective_fps": round(self.fps, 3),
+            "record_fps": round(self.fps, 3),
+            "n_gap_frames": (last - first + 1) - len(detections),
+            "n_pose_frames": n_kpts,
+            "entry_edge": nearest_edge(*pts[0], self.width, self.height) if pts else None,
+            "exit_edge": nearest_edge(*pts[-1], self.width, self.height) if pts else None,
+            "model": cfg.model,
+            "source_video": source.name,
+            # sha256 of the input video these frames index into (key name kept for
+            # geometry3d.adapt_trajectory and validation/validate_dataset.py)
+            "clip_video_sha256": video_sha256,
+            "time_basis": "source_video_frames",
+            "tracker": cfg.tracker,
+            "conf_threshold": cfg.conf,
+            "imgsz": cfg.imgsz,
+            "session_note": cfg.session_note,
+            "software": self.versions,
+            "git_commit": self.git_commit,
+            "keypoint_format": "COCO-17",
+            "keypoint_names": COCO_KEYPOINT_NAMES,
+            "keypoint_coords": "pixels (divide by frame_width/height to normalise)",
+            "pose_sidecar": cfg.write_pose_sidecar,
+        }
+        sample = build_sample_json(
+            track_id=rec["track_id"], label=label, result=result, reason=reason,
+            fps=self.fps, width=self.width, height=self.height,
+            door=self.door, axes=self.axes, frames=frames, meta=meta)
+        trajectory_path = self.date_dir / f"{base}.json"
+        with trajectory_path.open("w", encoding="utf-8") as f:
+            json.dump(sample, f, indent=2)
 
-        if cfg.save_clips:
-            pts = valid_centers(frames)
-            entry_edge = nearest_edge(*pts[0], self.clean_width, self.clean_height) if pts else None
-            exit_edge = nearest_edge(*pts[-1], self.clean_width, self.clean_height) if pts else None
-            meta = {
-                "schema_version": SCHEMA_VERSION,
-                "session_id": f"{self.date_str}_{self.sess_str}",
-                "created_utc": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                "wall_start": rec["wall_start"],
-                "wall_end": datetime.datetime.now().isoformat(timespec="seconds"),
-                "duration_s": round(span, 3),
-                "effective_fps": round(eff_fps, 3) if eff_fps is not None else None,
-                "record_fps": round(self.record_fps, 3),   # fps the mp4 is encoded at
-                "n_gap_frames": sum(1 for f in frames if f.get("center") is None),
-                "n_pose_frames": n_kpts,
-                "entry_edge": entry_edge,
-                "exit_edge": exit_edge,
-                "model": cfg.model,
-                "source_video": rec["source_stem"],
-                "clip_video_sha256": (file_sha256(rec["temp_path"])
-                                      if rec['temp_path'] and rec['temp_path'].is_file() else None),
-                "time_basis": "source_video_frames",
-                "tracker": cfg.tracker,
-                "conf_threshold": cfg.conf,
-                "imgsz": cfg.imgsz,
-                "camera_index": cfg.camera_index,
-                "capture_resolution": [int(cfg.cap_width), int(cfg.cap_height)],
-                "distort": cfg.distort,
-                "session_note": cfg.session_note,
-                "software": self.versions,
-                "git_commit": self.git_commit,
-                "keypoint_format": "COCO-17",
-                "keypoint_names": COCO_KEYPOINT_NAMES,
-                "keypoint_coords": "pixels (divide by frame_width/height to normalise)",
-                "pose_sidecar": cfg.write_pose_sidecar,
-            }
-            sample = build_sample_json(
-                track_id=track_id, label=label, result=result, reason=reason,
-                fps=eff_fps, width=self.clean_width, height=self.clean_height,
-                door=self.door, axes=self.axes, frames=frames, meta=meta)
-            base = rec["base"]
-            dst = self.date_dir
-            with (dst / f"{base}.json").open("w", encoding="utf-8") as f:
-                json.dump(sample, f, indent=2)
-            # pose for every clip, so a removed clip that is restored by hand still has it
-            pose_name = None
-            if cfg.write_pose_sidecar and n_kpts > 0:
-                sidecar = build_pose_sidecar(
-                    frames=frames, source_name=f"{base}.mp4", label=label,
-                    fps=eff_fps, width=self.clean_width, height=self.clean_height)
-                pose_name = f"{base}_pose.json"
-                with (dst / pose_name).open("w", encoding="utf-8") as f:
-                    json.dump(sidecar, f)
-            video_name = None
-            if rec["temp_path"] is not None and rec["temp_path"].exists():
-                saved_video_path = dst / f"{base}.mp4"
-                os.replace(rec["temp_path"], saved_video_path)
-                video_name = saved_video_path.name
-                if result == "keep":          # removed clips never reach the pipeline
-                    self.processed_video_paths.append(str(saved_video_path.resolve()))
-            self.clip_rows.append({
-                "clip_id": base, "label": label, "manual_label": "",
-                "cleaning_result": result, "cleaning_reason": reason,
-                "session_id": meta["session_id"], "n_frames": len(frames),
-                "n_detected": sample["n_detected"], "duration_s": meta["duration_s"],
-                "video": video_name, "trajectory": f"{base}.json", "pose": pose_name,
-            })
+        # pose for every track, so a removed one that is restored by hand still has it
+        pose_path = None
+        if cfg.write_pose_sidecar and n_kpts > 0:
+            sidecar = build_pose_sidecar(
+                frames=frames, source_name=source.name, label=label,
+                fps=self.fps, width=self.width, height=self.height)
+            pose_path = self.date_dir / f"{base}_pose.json"
+            with pose_path.open("w", encoding="utf-8") as f:
+                json.dump(sidecar, f)
 
-        # Tally + one-line console update (printed only if print_labels).
+        if result == "keep":          # removed tracks never reach the pipeline
+            record = {"video": str(source.resolve()), "trajectory": str(trajectory_path.resolve())}
+            if pose_path is not None:
+                record["pose"] = str(pose_path.resolve())
+            self.processed_records.append(record)
+        self.clip_rows.append({
+            "clip_id": base, "label": label, "manual_label": "",
+            "cleaning_result": result, "cleaning_reason": reason,
+            "session_id": self.session_id, "n_frames": len(frames),
+            "n_detected": sample["n_detected"], "duration_s": meta["duration_s"],
+            "video": source.name, "trajectory": trajectory_path.name,
+            "pose": pose_path.name if pose_path else None,
+        })
+
         bucket = "removed" if result == "removed" else label
         self.counts[bucket] = self.counts.get(bucket, 0) + 1
         self.reason_counts[reason] = self.reason_counts.get(reason, 0) + 1
@@ -711,25 +550,12 @@ class LivePoseCollector:
             c = self.counts
             totals = f"enter={c['enter']} pass={c['pass']} exit={c['exit']} removed={c['removed']}"
             if result == "removed":
-                verb = "removed" if cfg.save_clips else "would remove"
-                print(f"[REMOVED:{reason}] id{track_id} "
-                      f"({span:.1f}s) {verb}   so far: {totals}")
+                print(f"[REMOVED:{reason}] {base} ({meta['duration_s']:.1f}s)   so far: {totals}")
             else:
-                verb = "saved" if cfg.save_clips else "labeled"
-                print(f"[{label.upper()}] {verb} id{track_id} ({span:.1f}s, {len(frames)} frames)"
-                      f"   so far: {totals}")
+                print(f"[{label.upper()}] {base} ({meta['duration_s']:.1f}s, "
+                      f"{sample['n_detected']} detected frames)   so far: {totals}")
 
     # -- perception ----------------------------------------------------------
-    def _undistort(self, frame):
-        if not self.apply_undistort:
-            return frame
-        cv2 = self.cv2
-        frame = cv2.remap(frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
-        if self.cfg.distort:
-            x, y, w, h = self.roi
-            return frame[y:y + h, x:x + w]
-        return frame
-
     def _extract_detections(self, result):
         """Return [(track_id, bbox[4], center[2], keypoints[17] or None), ...]."""
         out = []
@@ -760,76 +586,42 @@ class LivePoseCollector:
             out.append((int(tid), bbox, center, keypoints))
         return out
 
-    def _draw_overlay(self, frame, dets):
-        cv2 = self.cv2
-        for tid, bbox, center, kpts in dets:
-            x1, y1, x2, y2 = bbox
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"ID {tid}", (x1, y1 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            if kpts:
-                for (kx, ky, kc) in kpts:
-                    if kc > 0.3:
-                        cv2.circle(frame, (int(kx), int(ky)), 2, (0, 200, 255), -1)
-                for a, b in COCO_SKELETON:
-                    if kpts[a][2] > 0.3 and kpts[b][2] > 0.3:
-                        cv2.line(frame, (int(kpts[a][0]), int(kpts[a][1])),
-                                 (int(kpts[b][0]), int(kpts[b][1])), (255, 180, 0), 1)
-        cv2.ellipse(frame, self.door, self.axes, 0, 180, 360, (255, 0, 0), 2)
-        cv2.putText(frame, f"FPS: {self._fps}", (10, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        c = self.counts
-        tag = "" if self.cfg.save_clips else "NOT SAVING  "
-        cv2.putText(frame, f"{tag}enter:{c['enter']} pass:{c['pass']} "
-                            f"exit:{c['exit']} removed:{c['removed']}",
-                    (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1)
-
-    def _process_frame(self, clean, t_now: float):
-        """Run detection + tracking and update the per-track recordings."""
+    def _process_frame(self, frame, frame_index: int):
+        """Run detection + tracking on one frame and update the tracks."""
         result = self.model.track(
-            clean, persist=True, classes=[0],
+            frame, persist=True, classes=[0],
             tracker=self.cfg.tracker, conf=self.cfg.conf,
             imgsz=self.cfg.imgsz, device=self.cfg.device, verbose=False)[0]
-        dets = self._extract_detections(result)
 
         seen = set()
-        for tid, bbox, center, kpts in dets:
+        for tid, bbox, center, kpts in self._extract_detections(result):
             seen.add(tid)
             if tid in self.active:
                 rec = self.active[tid]
                 # A recycled id that pops back far from where it disappeared is a
-                # different person -> close the old clip and start a new one.
+                # different person -> end the old track and start a new one.
                 if rec["vanish"] > 0 and rec["last_center"] is not None:
                     jump = normalize_distance(
                         center[0], center[1],
                         rec["last_center"][0], rec["last_center"][1],
-                        self.clean_width, self.clean_height)
+                        self.width, self.height)
                     if jump > self.cfg.reentry_jump_frac:
-                        self._finalize_track(tid)
-                        self._start_track(tid, t_now)
-                if tid in self.active:
-                    self.active[tid]["vanish"] = 0
+                        self._end_track(tid)
+                        self._start_track(tid)
+                self.active[tid]["vanish"] = 0
             else:
-                self._start_track(tid, t_now)
+                self._start_track(tid)
+            rec = self.active[tid]
+            rec["detections"][frame_index] = (center, bbox, kpts)
+            rec["last_center"] = center
 
-            if self.active[tid]["writer"] is not None:
-                self.active[tid]["writer"].write(clean)
-            self._append_frame(tid, t_now, center, bbox, kpts)
-
-        # Tracks not seen this frame: keep them alive within the grace window
-        # (writing null frames so the indices stay aligned), then finalise.
+        # Tracks not seen this frame end once they are missing for grace_frames.
         for tid in list(self.active.keys()):
             if tid in seen:
                 continue
-            rec = self.active[tid]
-            rec["vanish"] += 1
-            if rec["writer"] is not None:
-                rec["writer"].write(clean)
-            self._append_frame(tid, t_now, None, None, None)
-            if rec["vanish"] >= self.cfg.grace_frames + self.tail_frames:
-                self._finalize_track(tid)
-
-        return dets
+            self.active[tid]["vanish"] += 1
+            if self.active[tid]["vanish"] >= self.cfg.grace_frames:
+                self._end_track(tid)
 
     def _source_paths(self) -> list[Path]:
         if self.cfg.source_video:
@@ -840,7 +632,7 @@ class LivePoseCollector:
             source_dir = Path(self.cfg.source_dir)
             sources = sorted(
                 path for path in source_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv", ".m4v"}
+                if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
             ) if source_dir.is_dir() else []
             if not sources:
                 raise RuntimeError(
@@ -852,14 +644,6 @@ class LivePoseCollector:
                 raise RuntimeError(f"Video source does not exist: {source}")
         return sources
 
-    def _open_source(self, source: Path):
-        cv2 = self.cv2
-        cap = cv2.VideoCapture(str(source))
-        if not cap.isOpened():
-            raise RuntimeError(f"Cannot open video source: {source}")
-        print(f"[INIT] video source: {source}")
-        return cap
-
     def _reset_tracker(self):
         """Clear Ultralytics tracker state before processing another video."""
         predictor = getattr(self.model, "predictor", None)
@@ -870,118 +654,65 @@ class LivePoseCollector:
                 if reset is not None:
                     reset()
 
-    def _run_source(self, source: Path, display: bool) -> bool:
-        """Process one video and return False when the user requested a stop."""
+    def _run_source(self, source: Path):
+        """Track one whole video, then write one JSON pair per tracked person."""
         cv2 = self.cv2
+        cap = cv2.VideoCapture(str(source))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video source: {source}")
+        print(f"[INIT] video source: {source}")
         self.current_source_stem = source.stem
         self.source_clip_counts.setdefault(self.current_source_stem, 0)
-        self.cap = self._open_source(source)
         self.active.clear()
-        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        reported = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        self._init_geometry(w, h, reported,
-                            apply_undistort=self.cfg.distort,
-                            for_writing=self.cfg.save_clips)
+        self.finished.clear()
         try:
-            source_frame_index = 0
+            self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            declared = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if self.fps <= 0:
+                raise RuntimeError(f"Video reports no usable FPS: {source}")
+            self.door = (self.width // 2, self.height - 1)   # bottom-center of the frame
+            self.min_frames = max(2, int(round(self.cfg.min_duration_s * self.fps)))
+
+            n_frames = 0
             while True:
-                t0 = time.perf_counter()
-                ret, frame = self.cap.read()
-                t_now = time.perf_counter()          # read done (also the per-frame timestamp)
+                ret, frame = cap.read()
                 if not ret:
-                    print(f"[RUN] Finished video: {source.name}")
-                    return True
-                clean = self._undistort(frame)
-                t_und = time.perf_counter()
-                # Offline features follow video time, not machine/inference throughput.
-                source_fps = reported if reported > 0 else self.record_fps
-                source_time = source_frame_index / source_fps
-                source_frame_index += 1
-                dets = self._process_frame(clean, source_time)
-                t_proc = time.perf_counter()
-
-                if self.cfg.debug:
-                    self._stage_ms["read"] += (t_now - t0) * 1000.0
-                    self._stage_ms["undistort"] += (t_und - t_now) * 1000.0
-                    self._stage_ms["track+proc"] += (t_proc - t_und) * 1000.0
-                    self._stage_n += 1
-                    if self._first_shape is None:
-                        self._first_shape = clean.shape
-                        print(f"[DEBUG] actual captured frame shape: {clean.shape}")
-
-                self._fps_frames += 1
-                now = time.time()
-                if now - self._fps_t0 >= 1.0:
-                    self._fps = self._fps_frames
-                    self._fps_frames = 0
-                    self._fps_t0 = now
-                if now - self._status_t0 >= self.cfg.status_every_s:
-                    self._status_t0 = now
-                    c = self.counts
-                    word = "recording" if self.cfg.save_clips else "monitoring"
-                    msg = (f"[..] {word}  fps={self._fps}  tracking={len(self.active)}  "
-                           f"|  enter={c['enter']} pass={c['pass']} exit={c['exit']} removed={c['removed']}")
-                    if self.cfg.debug and self._stage_n:
-                        n = self._stage_n
-                        msg += ("  ||  per-frame ms:"
-                                f" read={self._stage_ms['read'] / n:.1f}"
-                                f" undistort={self._stage_ms['undistort'] / n:.1f}"
-                                f" track+proc={self._stage_ms['track+proc'] / n:.1f}"
-                                f" draw={self._stage_ms['draw'] / n:.1f}")
-                        for k in self._stage_ms:
-                            self._stage_ms[k] = 0.0
-                        self._stage_n = 0
-                    print(msg)
-
-                if display:
-                    t_d = time.perf_counter()
-                    disp = clean.copy()
-                    self._draw_overlay(disp, dets)
-                    if not self.cfg.fullscreen:
-                        disp = cv2.resize(disp, (960, 540))
-                    cv2.imshow("Pose Data Collection", disp)
-                    key = cv2.waitKey(1) & 0xFF
-                    if self.cfg.debug:
-                        self._stage_ms["draw"] += (time.perf_counter() - t_d) * 1000.0
-                    if key == ord("q"):
-                        return False
-        except KeyboardInterrupt:
-            print("\n[RUN] Stopped by user (Ctrl+C).")
-            return False
+                    break
+                self._process_frame(frame, n_frames)
+                n_frames += 1
         finally:
-            for tid in list(self.active.keys()):
-                self._finalize_track(tid)
-            self.active.clear()
-            self.cap.release()
-            self.cap = None
+            cap.release()
 
-    def run(self, display: bool = True, on_progress=None, failures=None, fail_fast: bool = False):
-        """Process all configured videos. display=False runs headlessly.
+        # Written only after the whole video was read, so every JSON has one
+        # frame per video frame (a video that fails midway writes nothing).
+        for tid in list(self.active.keys()):
+            self._end_track(tid)
+        if n_frames != declared:
+            print(f"[WARN] {source.name}: read {n_frames} frames, the video declares {declared}")
+        if self.finished:
+            video_sha256 = file_sha256(source)
+            for rec in self.finished:
+                self._write_track(rec, source, n_frames, video_sha256)
+        self.finished.clear()
+        print(f"[RUN] Finished video: {source.name}")
+
+    def run(self, on_progress=None, failures=None, fail_fast: bool = False):
+        """Process all configured videos.
 
         on_progress, if given, is called once after each finished video
         (on_progress(ok=False) for a video that failed).
         A video that raises is skipped and added to failures as
         {'video', 'stage', 'error'}; with fail_fast=True the error is raised instead."""
-        cv2 = self.cv2
-        action = "Recording" if self.cfg.save_clips else "Monitoring (not saving)"
         sources = self._source_paths()
-        print(f"[RUN] {action}: {len(sources)} video(s)")
-        if display:
-            print("[RUN] Press 'q' in the window to stop.")
-            cv2.namedWindow("Pose Data Collection", cv2.WINDOW_NORMAL)
-            if self.cfg.fullscreen:
-                cv2.setWindowProperty("Pose Data Collection",
-                                      cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        else:
-            print(f"[RUN] {action} (headless). Press Ctrl+C to stop.")
-
+        print(f"[RUN] Tracking {len(sources)} video(s). Press Ctrl+C to stop.")
         try:
             for index, source in enumerate(sources, start=1):
                 print(f"[RUN] video {index}/{len(sources)}")
                 self._reset_tracker()
                 try:
-                    keep_going = self._run_source(source, display)
+                    self._run_source(source)
                 except Exception as error:
                     if fail_fast:
                         raise
@@ -992,8 +723,6 @@ class LivePoseCollector:
                     if on_progress:
                         on_progress(ok=False)
                     continue
-                if not keep_going:
-                    break
                 if on_progress:
                     on_progress()
         except KeyboardInterrupt:
@@ -1002,53 +731,40 @@ class LivePoseCollector:
             self.cleanup()
 
     def cleanup(self):
-        for tid in list(self.active.keys()):
-            self._finalize_track(tid)
-        if self.cap is not None:
-            self.cap.release()
-        try:
-            self.cv2.destroyAllWindows()
-        except Exception:
-            pass
-        if self.cfg.save_clips:
-            self._write_session_metadata()
-            self._write_processed_video_paths()
-            if self.clip_rows:
-                update_clips_csv(self.date_dir / "clips.csv", self.clip_rows)
-                print(f"[DONE] clip index: {self.date_dir / 'clips.csv'}")
+        self._write_session_metadata()
+        self._write_processed_manifest()
+        if self.clip_rows:
+            update_clips_csv(self.date_dir / "clips.csv", self.clip_rows)
+            print(f"[DONE] clip index: {self.date_dir / 'clips.csv'}")
         print(f"[DONE] session {self.sess_str}: {self.counts}  reasons={self.reason_counts}")
 
     def _write_session_metadata(self):
         meta = {
             "schema_version": SCHEMA_VERSION,
-            "session_id": f"{self.date_str}_{self.sess_str}",
+            "session_id": self.session_id,
             "session_start": self.session_start.isoformat(timespec="seconds"),
             "session_end": datetime.datetime.now().isoformat(timespec="seconds"),
             "session_note": self.cfg.session_note,
             "software": self.versions,
             "git_commit": self.git_commit,
             "config": _config_to_jsonable(self.cfg),
-            "frame_width": self.clean_width,
-            "frame_height": self.clean_height,
-            "record_fps": self.record_fps,
-            "door_center": [int(self.door[0]), int(self.door[1])],
-            "ellipse_axes": [int(self.axes[0]), int(self.axes[1])],
             "n_clips_total": self.seq,
             "counts": self.counts,
             "reason_counts": self.reason_counts,
         }
-        path = self.date_dir / f"session_{self.date_str}_{self.sess_str}.json"
+        path = self.date_dir / f"session_{self.session_id}.json"
         with path.open("w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         print(f"[DONE] session metadata: {path}")
-    
-    def _write_processed_video_paths(self):
+
+    def _write_processed_manifest(self):
+        """{video, trajectory, pose} per kept track; video is the input video itself."""
         path = (Path(self.cfg.processed_manifest) if self.cfg.processed_manifest else
                 Path(self.cfg.source_dir).parent / "processed_video_paths.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         print(path)
         with path.open("w", encoding="utf-8") as f:
-            json.dump(self.processed_video_paths, f, indent=2)
+            json.dump(self.processed_records, f, indent=2)
 
 
 def _config_to_jsonable(cfg: CollectorConfig) -> dict:
@@ -1058,13 +774,13 @@ def _config_to_jsonable(cfg: CollectorConfig) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Run the collector
+# Run the tracker
 # ---------------------------------------------------------------------------
 def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu",
-        on_progress=None, failures=None, fail_fast=False, videos=None) -> list[str]:
+        on_progress=None, failures=None, fail_fast=False, videos=None) -> list[dict]:
     # ----------------------------------------------------------------------- #
-    # Settings -- edit these, then just run the script (Run in your editor, or #
-    # `python video_processor.py`). No command-line arguments are needed. #
+    # Settings -- edit these, then just run the script                         #
+    # (`python video_processor.py`). No command-line arguments are needed.     #
     # ----------------------------------------------------------------------- #
     if source_dir is None:
         source_dir = Path(__file__).resolve().parents[1] / "source"
@@ -1078,28 +794,23 @@ def run(source_dir=None, output_root=None, processed_manifest=None, device="cpu"
         device=device,
         tracker="bytetrack.yaml",   # lighter than botsort.yaml for CPU processing
         imgsz=640,                   # lower (e.g. 480) trades accuracy for CPU speed
-        # --- video source / geometry ---
+        # --- input videos ---
         source_dir=str(source_dir),
         processed_manifest=str(processed_manifest) if processed_manifest else None,
         source_video=None,           # set a path to override source_dir selection
         source_videos=[str(v) for v in videos] if videos else None,  # exact list from the pipeline; else scan source_dir
         ellipse_axes=(480, 130),     # door entrance region (half-ellipse)
-        distort=False,               # new video source: no Jetson calibration by default
-        # --- run mode ---
-        fullscreen=False,
-        save_clips=True,             # False -> track + label + show, but write nothing (monitor)
+        # --- output ---
         print_labels=True,            # print a line each time a person is labeled enter/pass/exit
-        headless=True,                # no preview window; set False to watch the live window
-        debug=False,                  # prints the per-frame ms breakdown; set False for normal runs
-        session_note="",             # optional free-text note saved in each clip's metadata
+        session_note="",             # optional free-text note saved in each person's metadata
     )
 
     # The dataset is written next to this script, in ../data.
     cfg.output_root = str(output_root or Path(__file__).resolve().parents[1] / "data")
 
     collector = LivePoseCollector(cfg)
-    collector.run(display=not cfg.headless, on_progress=on_progress, failures=failures, fail_fast=fail_fast)
-    return collector.processed_video_paths
+    collector.run(on_progress=on_progress, failures=failures, fail_fast=fail_fast)
+    return collector.processed_records
 
 
 if __name__ == "__main__":
