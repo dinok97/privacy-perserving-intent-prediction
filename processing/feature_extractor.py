@@ -1,5 +1,5 @@
 """
-feature_extractor.py  –  MVP feature extractor (schema feat-0.3)
+feature_extractor.py  –  MVP feature extractor (schema feat-0.4)
 
 Inputs per clip (<stem> = <video>_<action>, action = enter/pass/exit):
     <stem>.json              trajectory + COCO-17 keypoints in pixels (Jesper's script)
@@ -38,7 +38,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-SCHEMA_VERSION = "feat-0.3"
+SCHEMA_VERSION = "feat-0.4"
 
 # ---------------------------------------------------------------- parameters
 PARAMS = {

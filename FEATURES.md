@@ -17,7 +17,7 @@
 
 ## 1. What this file describes
 
-The content of **`<clip>_features.json`** (schema `feat-0.3`), the final output
+The content of **`<clip>_features.json`** (schema `feat-0.4`), the final output
 of the pipeline. It is produced by `processing/feature_extractor.py` from three inputs:
 
 - the trajectory `<clip>.json` (where the person is, per frame),
