@@ -382,7 +382,7 @@ include the external repository revision, checkpoint hash and inference settings
 
 ### Combined feature format
 
-The existing `feat-0.3` feature JSON retains its 2D groups and adds a
+The existing `feat-0.4` feature JSON retains its 2D groups and adds a
 `geometry_3d` object to each `data.frames` row. Joining checks frame IDs,
 timestamps and source provenance. It does not assume list order alone.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the supervisors' pipeline output (feat-0.3) without needing their log.
+"""Validate the supervisors' pipeline output (feat-0.4) without needing their log.
 
 Input: one or more SOURCE folders, each holding one clip folder per clip:
 
@@ -58,7 +58,7 @@ FILES = {  # role -> required filename suffix
 }
 LABELS = {"enter", "pass", "exit"}
 SKIP_DIRS = {"logs", "tracks"}  # the pipeline writes these next to the clip folders
-EXPECTED_SCHEMA = {"feat-0.3"}
+EXPECTED_SCHEMA = {"feat-0.4"}
 FRAME_BLOCKS = ("pos", "kin", "pose", "scene_rel", "geometry_3d")
 
 # Nulls that FEATURES.md says are by design, or that are structural in the sample files
@@ -140,7 +140,7 @@ HINTS = {
     "IMAGE_SIZE_VS_JSON": "Image size differs from frame_size in the JSON, so polygons would not line up with the image.",
     "JSON_UNREADABLE": "The JSON is truncated or corrupt. Open the named file; re-copy it, else the clip must be re-run.",
     "SCHEMA_KEYS": "features.json lacks an expected top-level key. Compare with a good clip; different schema version?",
-    "SCHEMA_VERSION": "Not feat-0.3. The clip came from another pipeline version; do not mix it into the same dataset.",
+    "SCHEMA_VERSION": "Not feat-0.4. The clip came from another pipeline version; do not mix it into the same dataset.",
     "LABEL_INVALID": "info.label is not enter/pass/exit. Open features.json and check info.label.",
     "LABEL_DIFFERS_FROM_SOURCE": "Normal when a bystander walks through a recording of the other class; it is only context.",
     "LABEL_FILENAME_MISMATCH": "The label in the file name differs from info.label. Check that files from two clips were not swapped.",

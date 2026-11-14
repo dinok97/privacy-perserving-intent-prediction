@@ -17,7 +17,7 @@
 
 ## 1. What this file describes
 
-The content of **`<clip>_features.json`** (schema `feat-0.3`), the final output
+The content of **`<clip>_features.json`** (schema `feat-0.4`), the final output
 of the pipeline. It is produced by `processing/feature_extractor.py` from three inputs:
 
 - the trajectory `<clip>.json` (where the person is, per frame),
@@ -130,6 +130,7 @@ So there are three automatic types:
 
 | field | meaning |
 |---|---|
+| `vx`, `vy` | horizontal and vertical ground-point velocity in px/s; positive `vx` is rightward, positive `vy` is downward |
 | `speed_px_s`, `speed_bh_s` | ground speed |
 | `accel_bh_s2` | change of speed |
 | `heading_deg` | walking direction (`null` below 0.1 bh/s – direction is noise when standing) |
@@ -160,6 +161,7 @@ camera barely moves in the image, but grows quickly.
 | `dist_block_px`, `dist_block_bh` | distance to the nearest wall or window |
 | `occlusion_frac` | share of the bbox covered by wall / window / door |
 | `target.dist_px`, `target.dist_bh` | distance to the target threshold |
+| `target.closure_rate` | `(D_door(t - K) - D_door(t)) / (K / fps)` in px/s; positive means approaching |
 | `target.align_deg` | 0 when the walking direction points into the target opening |
 | `target.align_center_deg` | angle to the opening's centre (separates wide openings) |
 | `target.ttr_s` | time to reach the target at the current approach speed |
@@ -202,6 +204,9 @@ causal** (`causal: false` in the catalog). Door keys here are separate from the
 
 All thresholds are in `PARAMS` at the top of `processing/feature_extractor.py`
 (e.g. `min_gap_px` for the narrowest edge exit, `n_competitors`,
-`smooth_window`). Pixel thresholds are tuned for a 640 px wide frame and scale
-with the resolution. They are copied into `info.params` of every output, so each
-file records how it was made.
+`smooth_window`, `closure_rate_lag_frames`). The closure-rate lag `K` defaults to
+3 frames; FPS comes from trajectory metadata (`effective_fps`, then `record_fps`)
+when available; otherwise the elapsed timestamp interval across those `K` frames
+is used. Pixel thresholds are tuned for a 640 px wide frame and scale with the
+resolution. They are copied into `info.params` of every output, so each file
+records how it was made.
