@@ -72,6 +72,7 @@ PARAMS = {
     "origin_max_dist_bh": 1.0,     # first point within this of an exit => origin
     "min_speed_bh_s": 0.1,         # below this, heading/alignment are undefined
     "smooth_window": 3,            # causal moving average on ground point
+    "closure_rate_lag_frames": 3,  # target distance change over the previous 3 frames
     "n_competitors": 2,
 }
 
@@ -102,6 +103,13 @@ def ang_diff(a, b):
     """Smallest absolute difference between two angles in degrees (0..180)."""
     d = (a - b + 180.0) % 360.0 - 180.0
     return abs(d)
+
+
+def calculate_closure_rate(current_dist, lagged_dist, elapsed_s):
+    """Distance closed per second; positive values mean approaching the target."""
+    if current_dist is None or lagged_dist is None or elapsed_s is None or elapsed_s <= 0:
+        return None
+    return (lagged_dist - current_dist) / elapsed_s
 
 
 def poly_area(poly):
@@ -743,9 +751,17 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
     kps = load_keypoints(traj, pose, W, H)
     frames_in = traj["frames"]
     n = len(frames_in)
+    meta = traj.get("meta", {})
 
     # ---- pass 1: raw per-frame geometry
     t = np.array([fr["t"] for fr in frames_in], float)
+    fps = meta.get("effective_fps") or meta.get("record_fps")
+    try:
+        fps = float(fps)
+        if not math.isfinite(fps) or fps <= 0:
+            fps = None
+    except (TypeError, ValueError):
+        fps = None
     # a frame counts as detected if the tracker saw the person: keypoints, bbox or centre (pose is optional)
     det = np.array([kps[i] is not None or fr.get("bbox") is not None or fr.get("center") is not None
                     for i, fr in enumerate(frames_in)])
@@ -804,6 +820,8 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
     heading = np.degrees(np.arctan2(vel[:, 1], vel[:, 0]))       # 0=right, 90=down (image)
 
     frames_out = []
+    target_distances = [None] * n
+    closure_lag = max(int(PARAMS["closure_rate_lag_frames"]), 1)
     prev = {"speed": None, "heading": None, "t": None}
     exit_anchors = [e["anchor_px"] for e in scene.exits]
     exit_segs = [e["segment_px"] for e in scene.exits]
@@ -832,6 +850,8 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
                 turn = dh / dt
                 curv = math.radians(turn) / sp if sp > 1e-6 else None
         kin = {
+            "vx": float(v[0]) if v is not None else None,
+            "vy": float(v[1]) if v is not None else None,
             "speed_px_s": sp,
             "speed_bh_s": sp / bh if sp is not None and bh else None,
             "accel_bh_s2": accel / bh if accel is not None and bh else None,
@@ -889,6 +909,14 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
                           "status": e["status"], **exits_rel[k]})
         comps += [None] * (PARAMS["n_competitors"] - len(comps))
         tr = rel(tgt_seg, scene.target)
+        
+        # calculate closure rate
+        target_distances[i] = tr["dist_px"]
+        lagged_dist = target_distances[i - closure_lag] if i >= closure_lag else None
+        elapsed = (closure_lag / fps if fps is not None else
+                   t[i] - t[i - closure_lag] if i >= closure_lag else None)
+        tr["closure_rate"] = calculate_closure_rate(tr["dist_px"], lagged_dist, elapsed)
+        
         best_comp = comps[0]["align_deg"] if comps[0] else None
         most_aligned = None
         if tr["align_deg"] is not None:
@@ -936,8 +964,6 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
     disp = float(np.hypot(*(gp[last] - gp[first]))) if len(valid) > 1 else None
     med_bh = float(np.nanmedian(bh_ref)) if np.isfinite(bh_ref).any() else None
     spd_bh = speed / bh_ref
-    meta = traj.get("meta", {})
-
     # camera geometry from this track: bbox height grows linearly with ground y under a
     # flat floor; where the fit hits 0 is the horizon (vanishing line) -> tilt proxy
     ok = det & ~trunc & np.isfinite(bbox_h) & np.isfinite(gp[:, 1])
@@ -1024,6 +1050,8 @@ CATALOG = [
     C("pos.on_floor", "frame", "pos", "bool", [T, S], True, "Ground point inside floor mask"),
     C("pos.inside_exit_idx", "frame", "pos", "index", [T, S], True, "Door exit whose polygon contains the ground point"),
     C("kin.speed_bh_s", "frame", "kin", "bh/s", [T], True, "Ground speed in body heights per second"),
+    C("kin.vx", "frame", "kin", "px/s", [T], True, "Horizontal ground-point velocity; positive to the right"),
+    C("kin.vy", "frame", "kin", "px/s", [T], True, "Vertical ground-point velocity; positive downward in image coordinates"),
     C("kin.accel_bh_s2", "frame", "kin", "bh/s^2", [T], True, "Change of speed"),
     C("kin.heading_deg", "frame", "kin", "deg", [T], True, "Walking direction in image"),
     C("kin.turn_rate_deg_s", "frame", "kin", "deg/s", [T], True, "Heading change rate"),
@@ -1046,6 +1074,7 @@ CATALOG = [
     C("scene_rel.dist_block_bh", "frame", "scene_rel", "bh", [T, S], True, "Distance to nearest wall/window"),
     C("scene_rel.occlusion_frac", "frame", "scene_rel", "0-1", [T, S], True, "Share of bbox overlapping wall/window/door"),
     C("scene_rel.target.dist_bh", "frame", "scene_rel", "bh", [T], True, "Distance to target door"),
+    C("scene_rel.target.closure_rate", "frame", "scene_rel", "px/s", [T], True, "Target distance closed over the previous K frames; positive means approaching"),
     C("scene_rel.target.align_deg", "frame", "scene_rel", "deg", [T], True, "Angle between heading and direction to target"),
     C("scene_rel.target.align_center_deg", "frame", "scene_rel", "deg", [T], True, "Angle between heading and direction to the target's centre"),
     C("scene_rel.target.ttr_s", "frame", "scene_rel", "s", [T], True, "Time to reach target at current approach speed"),
