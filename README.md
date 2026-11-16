@@ -50,7 +50,7 @@ privacy-perserving-intent-prediction/
 
 ```
 video
-  │ 1. video cleanup           move duplicates and videos shorter than 0.5 seconds aside
+  │ 1. video cleanup           move unsuitable videos (duplicate, too short, etc) out of the input folder
   │ 2. fisheye correction      undistort the video if the lens bends straight lines
   │ 3. trajectory tracking     YOLO pose → one clip per person, labelled enter / pass / exit
   │ 4. background extraction   image of the empty room, people masked out
