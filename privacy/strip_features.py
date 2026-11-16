@@ -1,5 +1,5 @@
 """
-strip_features.py  -  privacy-reduced copy of a <clip>_features.json (schema feat-0.3)
+strip_features.py  -  privacy-reduced copy of a <clip>_features.json (schema feat-0.4)
 
 TEMPORARY post-processing step. It reads a finished features file, removes the
 fields listed in privacy/README.md for the chosen tier and writes a NEW file.
@@ -8,9 +8,12 @@ list of fields; the lists below are the single source of truth for this script.
 
 Tiers (cumulative)
     F0   nothing removed (baseline for the ablation)
-    F1   size:        absolute body size and the pixel twins that reveal it   (7 per-frame + 3 track-level)
+    F1   size:        absolute body size and the pixel twins that reveal it   (10 per-frame + 3 track-level)
     F2   F1 + body proportions                                                (+3 per-frame)
     F3   F2 + gait cues                                                       (+2 per-frame)
+    F4   F3 + pixel positions (person and room points)                           (+2 per-frame, +12 track/scene)
+         (with F1-F3 body height can still be recomputed from pixel positions divided
+          into any *_bh value; F4 removes the positions. Room sizes/lengths stay.)
 
 Besides the tiers, for F1-F3 the script also
     * pseudonymizes metadata that links the file to the raw video, a recording
@@ -21,9 +24,10 @@ Besides the tiers, for F1-F3 the script also
                                                           [--keep-3d-metres to keep]
 
 Usage
-    python privacy/strip_features.py --tier F2 --input data/pipeline/<clip>_features.json
+    python privacy/strip_features.py --input data/pipeline/<clip>/<clip>_features.json   # F1, F2 and F3
+    python privacy/strip_features.py --tier F2 --input data/pipeline/<clip>/<clip>_features.json
     python privacy/strip_features.py --tier F3 --input-dir data/pipeline --out-dir data/privacy_F3
-    python privacy/strip_features.py --tier F1 --input-dir data/pipeline --catalog data/pipeline/feature_catalog.json
+    python privacy/strip_features.py --input-dir data/pipeline --catalog data/pipeline/feature_catalog.json
     python privacy/strip_features.py --tier F2 --input x_features.json --key-file secret.key   # adds info.clip_id
 
 Output is named <stem>_features_<tier>.json (next to the input unless --out-dir is given).
@@ -41,7 +45,7 @@ import re
 import sys
 from pathlib import Path
 
-TIERS = ("F0", "F1", "F2", "F3")
+TIERS = ("F0", "F1", "F2", "F3", "F4")
 
 # ---- per-frame fields: paths are relative to one entry of data.frames.
 #      "name[]" = every element of a list (null entries are skipped).
@@ -51,9 +55,12 @@ FRAME_PATHS = {
         "pos.bh_ref_px",                       # body-height reference used for all _bh units
         "pose.body_height_px",                 # nose to mid-ankle, px
         "kin.speed_px_s",                      # twin of speed_bh_s
+        "kin.vx",                              # px/s; hypot(vx, vy) = speed_px_s -> bh
+        "kin.vy",
         "kin.curvature_per_px",                # = turn rate / px speed -> reveals the px speed, hence bh
         "scene_rel.dist_block_px",             # twin of dist_block_bh
         "scene_rel.target.dist_px",            # twin of target.dist_bh
+        "scene_rel.target.closure_rate",       # px/s; closure_rate_bh_s is kept (same signal in bh/s)
         "scene_rel.competitors[].dist_px",     # same block, per competitor
         "scene_rel.exits[].dist_px",           # same block, per exit
     ],
@@ -66,6 +73,10 @@ FRAME_PATHS = {
         "pose.ankle_sep_bh",
         "pose.wrist_spread_bh",
     ],
+    "F4": [                                    # position in pixels: with any _bh value it gives bh_ref_px back
+        "pos.ground_px",
+        "pos.ground_norm",
+    ],
 }
 
 # ---- track-level fields: paths are relative to the "data" object.
@@ -77,8 +88,24 @@ DATA_PATHS = {
     ],
     "F2": [],
     "F3": [],
+    "F4": [
+        # position in pixels: first/last position x frame size / displacement_bh = body height in px
+        "track_summary.causal.first_ground_norm",
+        "track_summary.hindsight.last_ground_norm",
+        "track_summary.causal.origin_exit.anchor_px",
+        "track_summary.causal.origin_exit.dist_px",   # = first y (or x) in px when the track appears at an edge
+        # known pixel POINTS in the room: a dist_bh to them gives the scale back (lengths and sizes stay)
+        "scene_summary.target.center_px",
+        "scene_summary.target.edge_gap_px",
+        "scene_summary.target.segment_px",
+        "scene_summary.exits[].anchor_px",
+        "scene_summary.exits[].segment_px",
+        "scene_summary.exits[].centroid_px",
+        "scene_summary.exits[].bbox_px",
+        "scene_summary.exits[].span_px",
+    ],
 }
-# camera_geom.horizon_y_px (= -intercept/slope) is a property of the camera and is kept.
+# camera_geom.horizon_y_px (= -intercept/slope) is a property of the camera; it is kept in every tier (no scale without the slope).
 
 # ---- 3D extension (only present with --with-3d)
 THREE_D_FRAME_PATHS = [
@@ -218,7 +245,6 @@ def strip(result, tier, *, metadata=True, keep_3d_metres=False, key=None):
         "tier": tier,
         "script": "privacy/strip_features.py",
         "removed_fields": removed,
-        "metadata_pseudonymized": bool(metadata and tier != "F0"),
         "dropped_3d_metres": bool(drop_3d),
         "note": "Data minimisation based on the literature in privacy/README.md. "
                 "Not verified anonymisation: no re-identification test was run.",
@@ -226,18 +252,24 @@ def strip(result, tier, *, metadata=True, keep_3d_metres=False, key=None):
     return out, report
 
 
-def filter_catalog(catalog, tier, keep_3d_metres=False):
-    """Remove stripped features from feature_catalog.json content."""
-    frame_paths, data_paths = paths_for(tier)
-    names = set(frame_paths) | set(data_paths)
-    drop_3d = tier != "F0" and not keep_3d_metres
-    kept = []
+def private_catalog(catalog, keep_3d_metres=False):
+    """feature_catalog.json content with one extra key per feature: 'tiers', the tiers that still contain it.
+
+    F0 = the full features file; a feature removed from F2 on has tiers ["F0", "F1"]."""
+    removed_from = {}                                  # name -> first tier that removes it
+    for tier in TIERS[1:]:
+        frame_paths, data_paths = paths_for(tier)
+        for n in [*frame_paths, *data_paths]:
+            removed_from.setdefault(n, tier)
+    features = []
     for entry in catalog.get("features", []):
         n = entry["name"]
-        if n in names or (drop_3d and n.startswith("geometry_3d.") and "_estimated_m" in n):
-            continue
-        kept.append(entry)
-    return {**catalog, "features": kept, "privacy_tier": tier}
+        first = removed_from.get(n)
+        if first is None and n.startswith("geometry_3d.") and "_estimated_m" in n and not keep_3d_metres:
+            first = "F1"
+        keep = TIERS if first is None else TIERS[:TIERS.index(first)]
+        features.append({**entry, "tiers": list(keep)})
+    return {**catalog, "features": features}
 
 
 def _out_path(src, tier, out_dir):
@@ -246,16 +278,46 @@ def _out_path(src, tier, out_dir):
     return target / f"{stem}_{tier}.json"
 
 
+PIPELINE_TIERS = ("F1", "F2", "F3", "F4")
+
+
+def write_tiers(src, tiers=PIPELINE_TIERS, *, out_dir=None, metadata=True, keep_3d_metres=False, key=None):
+    """Write <stem>_F<n>.json for each tier next to src (or into out_dir). Returns [(tier, path, report)].
+
+    Used by pipeline.py after feature extraction and by the command line below."""
+    src = Path(src)
+    original = json.loads(src.read_text(encoding="utf-8"))
+    written = []
+    for tier in tiers:
+        stripped, rep = strip(original, tier, metadata=metadata, keep_3d_metres=keep_3d_metres, key=key)
+        dest = _out_path(src, tier, out_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(stripped, indent=1), encoding="utf-8")
+        written.append((tier, dest, rep))
+    return written
+
+
+def write_private_catalog(catalog_path, *, out_dir=None, keep_3d_metres=False):
+    """feature_catalog.json -> feature_catalog_private.json (one file; each feature lists its tiers)."""
+    cat_path = Path(catalog_path)
+    catalog = json.loads(cat_path.read_text(encoding="utf-8"))
+    dest = Path(out_dir or cat_path.parent) / "feature_catalog_private.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(private_catalog(catalog, keep_3d_metres), indent=1), encoding="utf-8")
+    return dest
+
+
 def _inputs(args):
     if args.input:
         return [Path(args.input)]
     files = sorted(Path(args.input_dir).rglob("*_features.json"))
-    return [f for f in files if not re.search(r"_features_F[0-3]\.json$", f.name)]
+    return [f for f in files if not re.search(r"_features_F[0-4]\.json$", f.name)]
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tier", required=True, choices=TIERS, help="which tier to apply (cumulative)")
+    ap.add_argument("--tier", default="all", choices=TIERS + ("all",),
+                    help="tier to apply (cumulative); 'all' (default) writes F1, F2 and F3")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--input", help="one <clip>_features.json")
     src.add_argument("--input-dir", help="every *_features.json below this folder")
@@ -265,7 +327,7 @@ def main(argv=None):
     ap.add_argument("--keep-3d-metres", action="store_true",
                     help="keep the *_estimated_m fields and info.depth.metric_calibration (not recommended)")
     ap.add_argument("--key-file", help="file with a secret; adds info.clip_id = HMAC(secret, clip name)")
-    ap.add_argument("--catalog", help="feature_catalog.json to filter; written as feature_catalog_<tier>.json")
+    ap.add_argument("--catalog", help="feature_catalog.json; writes feature_catalog_private.json (each feature lists the tiers it is in)")
     ap.add_argument("--dry-run", action="store_true", help="report what would be removed, write nothing")
     args = ap.parse_args(argv)
 
@@ -274,41 +336,40 @@ def main(argv=None):
     if not files:
         ap.error("no *_features.json files found")
 
+    tiers = PIPELINE_TIERS if args.tier == "all" else (args.tier,)
     failed = 0
     for f in files:
         try:
-            result = json.loads(f.read_text(encoding="utf-8"))
-            stripped, rep = strip(result, args.tier, metadata=args.metadata == "on",
-                                  keep_3d_metres=args.keep_3d_metres, key=key)
+            if args.dry_run:
+                original = json.loads(f.read_text(encoding="utf-8"))
+                results = [(tier, None, strip(original, tier, metadata=args.metadata == "on",
+                                              keep_3d_metres=args.keep_3d_metres, key=key)[1]) for tier in tiers]
+            else:
+                results = write_tiers(f, tiers, out_dir=args.out_dir, metadata=args.metadata == "on",
+                                      keep_3d_metres=args.keep_3d_metres, key=key)
         except Exception as error:                                   # keep going; report at the end
             failed += 1
             print(f"FAILED {f}: {type(error).__name__}: {error}", file=sys.stderr)
             continue
-        removed = sum(rep["frame_fields"].values()) + sum(rep["data_fields"].values())
-        removed_3d = sum(n for _, n in rep["three_d"])
-        n_frame = len({p.split(".")[-1] for p, n in rep["frame_fields"].items() if n})   # distinct names
-        n_track = len([p for p, n in rep["data_fields"].items() if n])
-        print(f"{f.name}: {args.tier}  removed {removed} values "
-              f"({n_frame} per-frame fields, {n_track} track fields), "
-              f"{removed_3d} 3D-metre values, {len(rep['metadata'])} metadata items")
-        if args.keep_3d_metres and args.tier != "F0":
+        for tier, dest, rep in results:
+            removed = sum(rep["frame_fields"].values()) + sum(rep["data_fields"].values())
+            removed_3d = sum(n for _, n in rep["three_d"])
+            n_frame = len({p.split(".")[-1] for p, n in rep["frame_fields"].items() if n})   # distinct names
+            n_track = len([p for p, n in rep["data_fields"].items() if n])
+            print(f"{f.name}: {tier}  removed {removed} values "
+                  f"({n_frame} per-frame fields, {n_track} track fields), "
+                  f"{removed_3d} 3D-metre values, {len(rep['metadata'])} metadata items")
+            if dest:
+                print(f"  wrote {dest}")
+        if args.keep_3d_metres:
             print("  WARNING: --keep-3d-metres: estimated metres / *_bh speed gives body height in metres", file=sys.stderr)
-        if args.dry_run:
-            continue
-        dest = _out_path(f, args.tier, args.out_dir)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(json.dumps(stripped, indent=1), encoding="utf-8")
-        print(f"  wrote {dest}")
 
     if args.catalog and not args.dry_run:
-        cat_path = Path(args.catalog)
-        cat = filter_catalog(json.loads(cat_path.read_text(encoding="utf-8")), args.tier, args.keep_3d_metres)
-        dest = Path(args.out_dir or cat_path.parent) / f"feature_catalog_{args.tier}.json"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(json.dumps(cat, indent=1), encoding="utf-8")
-        print(f"wrote {dest} ({len(cat['features'])} features)")
+        dest = write_private_catalog(args.catalog, out_dir=args.out_dir, keep_3d_metres=args.keep_3d_metres)
+        print(f"wrote {dest}")
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+    

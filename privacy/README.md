@@ -1,19 +1,24 @@
-# privacy/ – dropping identity-bearing features (F0–F3)
+# privacy/ – dropping identity-bearing features (F0–F4)
 
-> **Status: proposal, not yet discussed with the group.** Branch
-> `privacy-feature-audit`. Nothing in the existing pipeline is changed: this
-> folder only *adds* a post-processing script, its tests and this document.
-> Line numbers refer to commit `757ad53`.
+> **Status: implemented as a pipeline stage; the tier choice and the open
+> points in §8 and §9 are not yet agreed with the supervisors.**
+> What changed in the repository: this folder (script, tests, this document), a
+> `Privacy tiers F1-F4` stage in `pipeline.py` (off with `--no-privacy-tiers`),
+> three `_bh` fields in `processing/feature_extractor.py` (`kin.vx_bh_s`,
+> `kin.vy_bh_s`, `scene_rel.target.closure_rate_bh_s`) and their rows in
+> `FEATURES.md`. Nothing else of the existing outputs is altered; the full
+> `<clip>_features.json` is written as before. Line numbers in §5 refer to
+> commit `757ad53` and are about 10 lines off after the `_bh` additions.
 
 ## Contents
 
 1. [What this is](#1-what-this-is)
 2. [Why: the evidence](#2-why-the-evidence)
-3. [What is dropped: tiers F0–F3](#3-what-is-dropped-tiers-f0f3)
+3. [What is dropped: tiers F0–F4](#3-what-is-dropped-tiers-f0f4)
 4. [What stays](#4-what-stays)
 5. [Dependency map](#5-dependency-map)
 6. [Other files that hold raw skeletons](#6-other-files-that-hold-raw-skeletons)
-7. [Using the temporary script](#7-using-the-temporary-script)
+7. [Using the script](#7-using-the-script)
 8. [Proposed permanent solution](#8-proposed-permanent-solution)
 9. [Limits and open questions](#9-limits-and-open-questions)
 
@@ -32,6 +37,7 @@ how much accuracy that costs:
 | **F1** | F0 without absolute body size |
 | **F2** | F1 without body proportions |
 | **F3** | F2 without gait cues |
+| **F4** | F3 without position and scene geometry in pixels (strictest; see §9 for why) |
 
 The tiers are cumulative, so the accuracy drop can be attributed to one group
 at a time (the same idea as Jesper's progressive pose ablation, Group B).
@@ -65,9 +71,9 @@ Suggested wording for the report: *"We removed features that the literature
 associates with identity and attribute leakage. Residual risk remains and was
 not empirically tested."*
 
-## 3. What is dropped: tiers F0–F3
+## 3. What is dropped: tiers F0–F4
 
-### Per-frame fields (12 distinct names, 7 + 3 + 2)
+### Per-frame fields (17 names: 10 in F1, 3 in F2, 2 in F3, 2 in F4)
 
 | Tier | Field (in `data.frames[i]`) | Why it is identity-bearing |
 |---|---|---|
@@ -75,6 +81,8 @@ not empirically tested."*
 | F1 | `pos.bh_ref_px` | The body-height reference used for every `_bh` value. Same information. |
 | F1 | `pose.body_height_px` | Nose to mid-ankle in pixels. |
 | F1 | `kin.speed_px_s` | Twin of `speed_bh_s`: `px/s ÷ bh/s = bh_ref_px`. |
+| F1 | `kin.vx`, `kin.vy` (feat-0.4) | Pixel velocity: `hypot(vx, vy) = speed_px_s`, so `÷ speed_bh_s` gives `bh_ref_px`. Kept as `vx_bh_s`, `vy_bh_s`. |
+| F1 | `scene_rel.target.closure_rate` (feat-0.4) | px/s; its change per K frames matches the change of `dist_bh` times `bh_ref_px`. Kept as `closure_rate_bh_s`. |
 | F1 | `kin.curvature_per_px` | = turn rate ÷ pixel speed, so `turn_rate ÷ curvature ÷ speed_bh_s = bh_ref_px`. |
 | F1 | `scene_rel.dist_block_px` | Twin of `dist_block_bh`. |
 | F1 | `scene_rel.target.dist_px` (and the copies in `competitors[]` and `exits[]`) | Twin of `dist_bh`. |
@@ -83,6 +91,7 @@ not empirically tested."*
 | F2 | `pose.leg_length_bh` | Static body proportion. |
 | F3 | `pose.ankle_sep_bh` | Step length / stride proxy (gait). |
 | F3 | `pose.wrist_spread_bh` | Arm-swing proxy (gait). |
+| F4 | `pos.ground_px`, `pos.ground_norm` | Position in the frame. Step in `ground_px` ÷ `dt` ÷ `speed_bh_s` gives `bh_ref_px` again (§9). |
 
 Why the "twins" are in F1: dropping only `bbox_h_px` would be pointless while
 `speed_px_s` and `speed_bh_s` sit side by side. I checked on a synthetic walk
@@ -91,20 +100,27 @@ within rounding (≤ 0.2 %). The curvature route also works (median error 3 %, 8
 % of frames within 10 %; it is blurred where the 3-decimal rounding of small
 curvature values bites).
 
-### Track level (in F1)
+### Track level (F1, and the F4 rows below)
 
 | Field | Reason |
 |---|---|
 | `track_summary.causal.first_bh_px` | Body height in pixels at first detection. |
-| `track_summary.hindsight.camera_geom.bh_vs_y_slope`, `bh_vs_y_intercept` | The fit of bbox height against ground y; the slope scales with person height. `horizon_y_px` (= −intercept/slope) is a camera property and **stays**, as do `bh_vs_y_r2`, `n_points`, `source`. |
+| F4: `first_ground_norm`, `last_ground_norm`, `origin_exit.anchor_px`, `origin_exit.dist_px` | Pixel positions of the person (first/last point; for a track that appears at an image edge `origin_exit.dist_px` *is* the first y or x in pixels). §9, routes D and E. |
+| F4: `scene_summary` pixel **points**: `target.center_px/edge_gap_px/segment_px`, `exits[].anchor_px/segment_px/centroid_px/bbox_px/span_px` | Known pixel points; a `dist_bh` to them gives the scale back, even without `ground_px` (§9, route C). Sizes and lengths of room objects (`width_px`, `threshold_len_px`, `protrusion_px`), `floor_top_y_px` and `camera_geom.horizon_y_px` **stay**: they carry no `_bh` twin and describe the room/camera. |
+| `track_summary.hindsight.camera_geom.bh_vs_y_slope`, `bh_vs_y_intercept` | The fit of bbox height against ground y; the slope scales with person height. `horizon_y_px` (= −intercept/slope) is a camera property and **stays in every tier**, as do `bh_vs_y_r2`, `n_points`, `source`. |
 
-### 3D extension (only with `--with-3d`; removed for F1–F3 unless `--keep-3d-metres`)
+### 3D extension (only with `--with-3d`; removed for F1–F4 unless `--keep-3d-metres`)
 
 | Field | Reason |
 |---|---|
 | `geometry_3d.point_ground_estimated_m`, `distances_estimated_m`, `closure_rates_estimated_m_per_s`, and `info.depth.metric_calibration` | **Hypothesis, not verified on real 3D data.** Ground speed in metres per second (from consecutive `point_ground_estimated_m`) divided by `speed_bh_s` gives metres per body height, i.e. body height in metres. The metric scale comes from an assumed door width and is shared across clips, so it is comparable between people. The `_model` fields use an arbitrary per-clip scale and are kept. |
 
-### Metadata (`info.*`; pseudonymized for F1–F3, `--metadata off` to disable)
+### Metadata (`info.*`; removed in F1–F4, `--metadata off` to keep it)
+
+**File names are not changed**: the tier files are called
+`<clip>_features_F<n>.json`, next to `<clip>_features.json`. Whether to
+pseudonymize the names (and keep a key) is open until the supervisors have
+decided (§8). The `label` (`enter`/`pass`) and `frame_size` stay in every tier.
 
 | Field | Action | Reason |
 |---|---|---|
@@ -112,15 +128,19 @@ curvature values bites).
 | `clip_video_sha256`, `depth.source_video_sha256` | removed | Links the features to the raw video file. |
 | `trajectory_meta.session_id` | removed | = recording date + clock time (`video_processor.py:644`). |
 | `sources.*` | file names replaced by `true`/`false` | Names are derived from the clip name. |
-| `clip_id` | added only with `--key-file` | `HMAC(secret, clip name)`, to join with a private lookup. |
+| `clip_id` | added only with `--key-file` (standalone script; the pipeline stage does not use it) | `HMAC(secret, clip name)`, to join with a private lookup. |
 
 ## 4. What stays
 
-29 per-frame fields, among them: `pos.ground_px/ground_norm`, `kin.speed_bh_s`,
+In every tier: `kin.vx_bh_s`, `vy_bh_s`, `scene_rel.target.closure_rate_bh_s`, `kin.speed_bh_s`,
 `accel_bh_s2`, `heading_deg`, `turn_rate_deg_s`, `looming_rate_per_s`, `tau_s`,
 `pose.shoulder_angle_deg`, `torso_vs_motion_deg`, `head_yaw_proxy`,
-`ear_vis_asym`, all `scene_rel` `_bh`/alignment/`ttr_s` fields, and the whole
-`scene_summary`. These are relative, angular or describe the room.
+`ear_vis_asym`, `kp_conf_mean`, all `scene_rel` `_bh`/alignment/`ttr_s` fields,
+`counts`, `areas`, brightness, and the room sizes listed in §3. These are
+relative, angular or describe the room.
+**Correction after testing real output:** `pos.ground_px/ground_norm` and the
+pixel points of `scene_summary` are *not* harmless: see §9. They stay in F1–F3
+and are removed only in F4.
 
 Worth a second look by the group (kept for now): `first_ground_norm`,
 `origin_exit`, `hindsight` speed and duration statistics and the entry/exit
@@ -192,40 +212,77 @@ Stripping the final JSON does **not** remove the identifying inputs next to it:
 The privacy argument is only as strong as the weakest of these. This needs a
 group decision (see §8, step 5).
 
-## 7. Using the temporary script
+## 7. Using the script
+
+### In the pipeline (default)
+
+`python pipeline.py ...` runs a **Privacy tiers F1-F4** stage after feature
+extraction. `pipeline_run.json` lists the tiers written under `"privacy_tiers"`
+(empty with `--no-privacy-tiers`) and the log ends with `Privacy tiers written: F1, F2, F3, F4`. For every clip it writes, in the same folder as `<clip>_features.json`:
+
+```
+<clip>_features.json        # full features (F0)
+<clip>_features_F1.json
+<clip>_features_F2.json
+<clip>_features_F3.json
+<clip>_features_F4.json
+```
+
+and one `feature_catalog_private.json` next to `feature_catalog.json`: the same
+catalog, with a `tiers` list per feature (e.g. `["F0", "F1"]` = present in the full file and F1 only). A clip whose
+tiers fail is logged and listed in `failed_clips` with `stage: privacy`; the
+other clips are not affected.
 
 ```bash
-# one file, tier F2
-python privacy/strip_features.py --tier F2 --input data/pipeline/<clip>_features.json
+python pipeline.py --no-privacy-tiers                      # skip the stage
+```
 
-# all clips, tier F3, separate folder, plus a filtered catalog
+### On its own (any existing output folder)
+
+```bash
+# one clip, all tiers (F1 to F4) next to the input
+python privacy/strip_features.py --input data/pipeline/<clip>/<clip>_features.json
+
+# every clip below a folder, one tier, separate folder, plus feature_catalog_private.json
 python privacy/strip_features.py --tier F3 --input-dir data/pipeline --out-dir data/privacy_F3 \
        --catalog data/pipeline/feature_catalog.json
 
 # dry run: only report what would be removed
-python privacy/strip_features.py --tier F1 --input-dir data/pipeline --dry-run
+python privacy/strip_features.py --input-dir data/pipeline --dry-run
 
 # add a pseudonymous clip_id (keep the key file private and out of git)
-python privacy/strip_features.py --tier F2 --input <clip>_features.json --key-file secret.key
+python privacy/strip_features.py --input <clip>_features.json --key-file secret.key
 ```
 
+Without `--tier` the script writes F1, F2, F3 and F4. Existing `*_features_F<n>.json`
+files are never picked up as input, and they are overwritten on a re-run.
+
 - The input is never modified. Output: `<clip>_features_<tier>.json`, and
-  `feature_catalog_<tier>.json` with `--catalog`. Keys are **deleted**, not set
+  `feature_catalog_private.json` with `--catalog`. Keys are **deleted**, not set
   to `null`, so a loader that expects fixed keys must read the catalog.
 - Each output gets `info.privacy` (tier, removed fields, the "not verified
   anonymisation" note).
 - A file is written only if an audit finds none of the removed names left
   anywhere in it. `dist_px` under `track_summary.causal.origin_exit` is
   allowed: it has no `_bh` twin in the output.
-- For F1–F3 the script also drops the 3D metre fields and pseudonymizes the
-  metadata (flags above).
-- Tests: `python -m unittest tests.test_strip_features -v` (10 tests, no
-  recordings needed; the features are produced by the real extractor from a
-  synthetic walk, so they follow the extractor's schema).
-- Checked only on synthetic data. No real recordings or 3D outputs were
-  available.
+- For F1–F4 the script also drops the 3D metre fields and removes the
+  identifying metadata (table above).
+- Tests: `python -m unittest tests.test_strip_features -v`, run from the
+  repository root (16 tests, no recordings needed; the features are produced by
+  the real extractor from a synthetic walk, so they follow the extractor's
+  schema).
+- Real output: the F1–F4 files of two clips (`motion_…`, `…_id7_enter`) were
+  checked. Every kept `kin`/`pose` value equals the base file (0 changed), F4
+  contains no per-person pixel position, and the removed-field lists are
+  18/21/23/37 for F1/F2/F3/F4. No 3D outputs were available.
 
-## 8. Proposed permanent solution
+## 8. Proposed permanent solution (not implemented)
+
+Today the tiers are a **post-processing stage**: the full file is written first,
+then F1–F4 are derived from it. The steps below describe the stricter option
+(emit only the allowed fields from the start). `--privacy-tier`, a policy module and
+pseudonymized file names are proposals only; there is no `--private` mode and
+no key flag in the pipeline.
 
 Goal: the pipeline emits a privacy-reduced file **by construction**, without
 writing a full JSON first. The idea is "compute what the model needs, emit only
@@ -276,23 +333,55 @@ what the policy allows".
    asserting that `extract(tier=T)` equals `strip(extract(tier=F0), T)`. Update
    `FEATURES.md` per tier and `README.md` §8.
 8. **Ablation stays possible.** Generate F0 once in a private location and
-   derive F1–F3 with the script for the experiments; the shipped dataset is
+   derive F1–F4 with the script for the experiments; the shipped dataset is
    produced at the chosen tier. Step 7's equivalence test guarantees that both
    routes give the same result.
 
-Decisions for the group: the default tier (F2 or F3?), keeping or dropping the
-estimated metres, the retention rule for raw tracks (step 5), who holds the
-pseudonym key, and whether position plus time features (`first_ground_norm`,
-`origin_exit`, hindsight statistics) are acceptable.
+Decisions for the group: the default tier (F3 or F4?), keeping or dropping the
+estimated metres, the retention rule for raw tracks (step 5), whether file
+names and in-file metadata are pseudonymized or removed (and who holds the key),
+how a private output is validated (`validation/validate_dataset.py` needs the
+trajectory JSON and the clip hash), and whether the hindsight statistics and
+entry/exit edges are acceptable.
 
 ## 9. Limits and open questions
 
 - **Not verified:** nothing here measures re-identification. The tiers rest on
-  the literature in §2 and on the arithmetic in §3 (checked on synthetic data).
+  the literature in §2 and on the arithmetic in §3.
+- **F1–F3 do not stop body height being recomputed.** Every kept `_bh` value is
+  a pixel quantity divided by body height, and the pixel quantities (position,
+  scene geometry) are still in the file. Tested on the real F3 output of two
+  clips (`motion_…` and `…_id7_enter`), against the true `bh_ref_px`:
+
+  | Route | Uses only | Result |
+  |---|---|---|
+  | A | steps of `ground_px` ÷ `dt` ÷ `speed_bh_s` | median error < 0.1 %, 100 % of frames within 10 % |
+  | B | `ground_px` + exit segments in `scene_summary` ÷ `dist_bh` | median error < 0.1 %, 100 % within 10 % |
+  | C | exit segments in `scene_summary` + the `dist_bh` to each exit (no `ground_px`) | median error 0.6 %, 100 % within 10 % (one clip) |
+  | D | `first_ground_norm`, `last_ground_norm` × frame size ÷ `displacement_bh` | 153.0 vs true 153.0 px (id7), 282.2 vs 281.8 px (motion) |
+  | E | `origin_exit.dist_px` (= first y when the track appears at the top edge) → distance to the bottom edge ÷ first `target.dist_bh` | 258.7 vs 266.0 px, 2.7 % error (motion clip; only for edge origins) |
+
+  So F1–F3 remove the *stored* size, proportion and gait fields and the
+  metadata, but not the information. At a fixed camera, pixel body height at a
+  known floor position tracks real height (the same relation `camera_geom`
+  fits), and height and proportions are the cues Cătrună et al. show carry
+  recognition. Height alone is a weak identifier; it matters in a small group.
+  F1–F3 can be described as "almost private; how private needs further study".
+- **F4 closes these routes** by dropping every pixel *position* (the person's
+  per-frame, first and last position, the origin distance, and the known pixel
+  points of the room). Pixel lengths and sizes of room objects, `floor_top_y_px`
+  and `horizon_y_px` stay (no `_bh` twin to divide into). Routes A–E cannot be
+  computed on F4 output, checked by tests and on two real clips; this is not a
+  proof, and other routes may exist. The cost (position, room layout) is what
+  the F3 vs F4 run measures.
+- **Not covered by the real-output check:** whether the kept `dist_bh` values
+  to several exits could rebuild the person's path relative to the doors.
+  Without the exits' pixel positions this gives no pixel scale, so no body
+  height; I expect it to be harmless but did not test it.
 - **3D leak:** the metres-over-body-height argument is derived from the schema,
   not tested on real LingBot output.
 - **Utility cost unknown:** `shoulder_width_bh` and `hip_width_bh` shrink when
   the body turns, which is an intent cue. The kept angles (`torso_vs_motion_deg`,
-  `shoulder_angle_deg`) may cover it. The F0–F3 comparison will tell.
+  `shoulder_angle_deg`) may cover it. The F0–F4 comparison will tell.
 - **Residual risk:** gait is redundant; position, time and route features stay.
   The result is "reduced risk", not "anonymous".

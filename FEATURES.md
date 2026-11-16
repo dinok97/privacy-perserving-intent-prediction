@@ -131,6 +131,7 @@ So there are three automatic types:
 | field | meaning |
 |---|---|
 | `vx`, `vy` | horizontal and vertical ground-point velocity in px/s; positive `vx` is rightward, positive `vy` is downward |
+| `vx_bh_s`, `vy_bh_s` | the same velocity in body heights per second (`vx / bh_ref_px`, `vy / bh_ref_px`) |
 | `speed_px_s`, `speed_bh_s` | ground speed |
 | `accel_bh_s2` | change of speed |
 | `heading_deg` | walking direction (`null` below 0.1 bh/s – direction is noise when standing) |
@@ -162,6 +163,7 @@ camera barely moves in the image, but grows quickly.
 | `occlusion_frac` | share of the bbox covered by wall / window / door |
 | `target.dist_px`, `target.dist_bh` | distance to the target threshold |
 | `target.closure_rate` | `(D_door(t - K) - D_door(t)) / (K / fps)` in px/s; positive means approaching |
+| `target.closure_rate_bh_s` | `closure_rate / bh_ref_px` in body heights per second |
 | `target.align_deg` | 0 when the walking direction points into the target opening |
 | `target.align_center_deg` | angle to the opening's centre (separates wide openings) |
 | `target.ttr_s` | time to reach the target at the current approach speed |

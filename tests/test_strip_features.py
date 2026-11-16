@@ -83,8 +83,8 @@ class StripFeatures(unittest.TestCase):
         self.assertEqual(before, self.original, 'input must not be modified')
         return out, report
 
-    def test_tier_sizes_are_7_10_12_distinct_per_frame_fields(self):
-        for tier, expected in (('F0', 0), ('F1', 7), ('F2', 10), ('F3', 12)):
+    def test_tier_sizes_are_10_13_15_17_distinct_per_frame_fields(self):
+        for tier, expected in (('F0', 0), ('F1', 10), ('F2', 13), ('F3', 15), ('F4', 17)):
             _, rep = self.strip(tier)
             names = {p.split('.')[-1] for p, n in rep['frame_fields'].items() if n}
             self.assertEqual(len(names), expected, tier)
@@ -122,6 +122,44 @@ class StripFeatures(unittest.TestCase):
                 self.assertTrue(all(c is None or 'dist_px' not in c for c in f['scene_rel']['competitors']))
                 self.assertTrue(all('dist_px' not in e for e in f['scene_rel']['exits']))
 
+    def test_velocity_and_closure_rate_px_removed_bh_versions_kept(self):
+        base = [f for f in self.original['data']['frames'] if f['detected'] and f['kin']['vx'] is not None]
+        self.assertTrue(base)
+        for f in base:   # the _bh version is the px value over bh_ref_px
+            self.assertAlmostEqual(f['kin']['vx_bh_s'] * f['pos']['bh_ref_px'], f['kin']['vx'], delta=.05 * abs(f['kin']['vx']) + .5)
+        self.assertTrue(any(f['scene_rel']['target'].get('closure_rate_bh_s') is not None
+                            for f in self.original['data']['frames'] if f['detected']))
+        out, _ = self.strip('F1')
+        for a, b in zip(self.original['data']['frames'], out['data']['frames']):
+            if a['detected']:
+                for k in ('vx', 'vy'):
+                    self.assertNotIn(k, b['kin'])
+                self.assertNotIn('closure_rate', b['scene_rel']['target'])
+                self.assertEqual(a['kin']['vx_bh_s'], b['kin']['vx_bh_s'])
+                self.assertEqual(a['kin']['vy_bh_s'], b['kin']['vy_bh_s'])
+                self.assertEqual(a['scene_rel']['target']['closure_rate_bh_s'],
+                                 b['scene_rel']['target']['closure_rate_bh_s'])
+
+    def test_write_tiers_puts_f1_f2_f3_next_to_the_features_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'clip-deadbeef00-12345678' / 'clip_features.json'
+            src.parent.mkdir()
+            src.write_text(json.dumps(self.original))
+            written = sf.write_tiers(src)
+            self.assertEqual([t for t, _, _ in written], ['F1', 'F2', 'F3', 'F4'])
+            self.assertEqual(sorted(p.name for p in src.parent.iterdir()),
+                             ['clip_features.json', 'clip_features_F1.json', 'clip_features_F2.json', 'clip_features_F3.json', 'clip_features_F4.json'])
+            self.assertEqual(json.loads((src.parent / 'clip_features_F2.json').read_text())['info']['privacy']['tier'], 'F2')
+
+    def test_pipeline_helper_reports_a_failure_instead_of_raising(self):
+        import pipeline
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / 'broken_features.json'
+            bad.write_text('{not json')
+            failures = pipeline.run_privacy_tiers([{'video': 'broken.mp4', 'features': str(bad)}])
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]['stage'], 'privacy')
+
     def test_origin_exit_distance_and_camera_horizon_are_kept(self):
         out, _ = self.strip('F3')
         causal = out['data']['track_summary']['causal']
@@ -133,6 +171,63 @@ class StripFeatures(unittest.TestCase):
         self.assertIn('horizon_y_px', geom)
         if causal['origin_exit'] and 'dist_px' in self.original['data']['track_summary']['causal']['origin_exit']:
             self.assertIn('dist_px', causal['origin_exit'])
+
+    def _recover_bh_from_ground_steps(self, out):
+        """Route A: pixel steps of ground_px / dt, divided by speed_bh_s. Returns relative errors or None."""
+        errs, frames = [], out['data']['frames']
+        for a, b, a0, b0 in zip(frames, frames[1:], self.original['data']['frames'], self.original['data']['frames'][1:]):
+            if not (a['detected'] and b['detected']) or 'ground_px' not in b['pos'] or 'ground_px' not in a['pos']:
+                continue
+            speed_bh = b['kin']['speed_bh_s']
+            if not speed_bh or speed_bh < .1:
+                continue
+            dt = b['t'] - a['t']
+            step = math.hypot(b['pos']['ground_px'][0] - a['pos']['ground_px'][0],
+                              b['pos']['ground_px'][1] - a['pos']['ground_px'][1]) / dt
+            true = b0['pos']['bh_ref_px']
+            if true:
+                errs.append(abs(step / speed_bh - true) / true)
+        return errs or None
+
+    def test_f3_can_still_recover_body_height_but_f4_cannot(self):
+        f3, _ = self.strip('F3')
+        errs = self._recover_bh_from_ground_steps(f3)
+        self.assertTrue(errs, 'F3 keeps ground_px, so the route must be computable')
+        self.assertLess(sorted(errs)[len(errs) // 2], .05)       # known limitation of F1-F3, see README 9
+        f4, _ = self.strip('F4')
+        self.assertIsNone(self._recover_bh_from_ground_steps(f4))
+
+    def test_route_d_first_and_last_position_over_displacement(self):
+        def route_d(out):
+            c, h = out['data']['track_summary']['causal'], out['data']['track_summary']['hindsight']
+            if 'first_ground_norm' not in c or 'last_ground_norm' not in h or not h.get('displacement_bh'):
+                return None
+            W, H = out['info']['frame_size']
+            f, l = c['first_ground_norm'], h['last_ground_norm']
+            return math.hypot((l[0] - f[0]) * W, (l[1] - f[1]) * H) / h['displacement_bh']
+        det = [f['pos']['bh_ref_px'] for f in self.original['data']['frames'] if f['detected'] and f['pos'].get('bh_ref_px')]
+        est = route_d(self.strip('F3')[0])
+        self.assertIsNotNone(est)
+        self.assertAlmostEqual(est / sorted(det)[len(det) // 2], 1, delta=.1)    # known limitation of F1-F3
+        self.assertIsNone(route_d(self.strip('F4')[0]))
+
+    def test_f4_removes_pixel_positions_and_keeps_room_sizes(self):
+        out, _ = self.strip('F4')
+        names = leaf_names(out['data'])
+        for gone in ('ground_px', 'ground_norm', 'first_ground_norm', 'last_ground_norm', 'anchor_px',
+                     'segment_px', 'centroid_px', 'bbox_px', 'span_px', 'center_px', 'edge_gap_px'):
+            self.assertNotIn(gone, names, gone)
+        # what may stay: lengths and sizes of room objects and the horizon
+        self.assertLessEqual({n for n in names if 'px' in n},
+                             {'horizon_y_px', 'floor_top_y_px', 'width_px', 'threshold_len_px', 'protrusion_px'})
+        for fr in out['data']['frames']:
+            if fr['detected']:
+                self.assertNotIn('ground_px', fr['pos'])
+        det = next(f for f in out['data']['frames'] if f['detected'] and f['scene_rel']['target']['dist_bh'] is not None)
+        self.assertIn('align_center_deg', det['scene_rel']['target'])
+        self.assertIn('speed_bh_s', det['kin'])
+        self.assertIn('horizon_y_px', out['data']['track_summary']['hindsight']['camera_geom'])
+        self.assertNotIn('dist_px', out['data']['track_summary']['causal'].get('origin_exit') or {})
 
     def test_metadata_and_3d_metres(self):
         out, _ = self.strip('F1')
@@ -186,11 +281,15 @@ class StripFeatures(unittest.TestCase):
                             '--catalog', str(temp / 'feature_catalog.json')])
             self.assertEqual(code, 0)
             self.assertTrue((temp / 'out' / 'office_features_F3.json').is_file())
-            names = {e['name'] for e in json.loads((temp / 'out' / 'feature_catalog_F3.json').read_text())['features']}
-            for gone in ('pos.bh_ref_px', 'pose.body_height_px', 'pose.hip_width_bh', 'pose.ankle_sep_bh',
-                         'kin.curvature_per_px', 'track_summary.causal.first_bh_px'):
-                self.assertNotIn(gone, names)
-            self.assertIn('kin.speed_bh_s', names)
+            tiers = {e['name']: e['tiers'] for e in json.loads((temp / 'out' / 'feature_catalog_private.json').read_text())['features']}
+            self.assertEqual(tiers['pos.bh_ref_px'], ['F0'])
+            self.assertEqual(tiers['kin.vx'], ['F0'])
+            self.assertEqual(tiers['pose.hip_width_bh'], ['F0', 'F1'])
+            self.assertEqual(tiers['pose.ankle_sep_bh'], ['F0', 'F1', 'F2'])
+            self.assertEqual(tiers['kin.curvature_per_px'], ['F0'])
+            self.assertEqual(tiers['kin.speed_bh_s'], ['F0', 'F1', 'F2', 'F3', 'F4'])
+            self.assertEqual(tiers['pos.ground_px'], ['F0', 'F1', 'F2', 'F3'])
+            self.assertEqual(tiers['kin.vx_bh_s'], ['F0', 'F1', 'F2', 'F3', 'F4'])
             # its own output is not picked up again as an input
             with self.assertRaises(SystemExit):
                 sf.main(['--tier', 'F3', '--input-dir', str(temp / 'out'), '--dry-run'])
