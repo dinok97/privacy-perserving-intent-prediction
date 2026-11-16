@@ -21,7 +21,6 @@ transformers>=5.0.0        # SAM 3 model and processor
 transformers>=5.0.0        # SAM 3 model and processor
 huggingface_hub>=0.34.0    # HF authentication CLI for gated SAM 3 access
 pillow>=10.0.0             # image loading for SAM 3
-fiftyone>=1.0.0            # interactive scene annotation workflow
 scikit-image               # image processing utilities
 
 # Download yolo11n-pose.pt separately and place it in this directory. Model weights
