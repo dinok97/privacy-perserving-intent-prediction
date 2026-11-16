@@ -50,17 +50,22 @@ privacy-perserving-intent-prediction/
 
 ```
 video
-  │ 1. fisheye correction      undistort the video if the lens bends straight lines
-  │ 2. trajectory tracking     YOLO pose → one clip per person, labelled enter / pass / exit
-  │ 3. background extraction   image of the empty room, people masked out
-  │ 4. segmentation            SAM 3 → floor / wall / door / window polygons
-  │ 5. feature extraction      person + scene → features per frame
+  │ 1. video cleanup           move duplicates and videos shorter than 0.5 seconds aside
+  │ 2. fisheye correction      undistort the video if the lens bends straight lines
+  │ 3. trajectory tracking     YOLO pose → one clip per person, labelled enter / pass / exit
+  │ 4. background extraction   image of the empty room, people masked out
+  │ 5. segmentation            SAM 3 → floor / wall / door / window polygons
+  │ 6. feature extraction      person + scene → features per frame
   ▼
 <clip>_features.json
-  │ 6. (optional) 3D           depth → distances to doors in estimated metres
+  │ 7. (optional) 3D           depth → distances to doors in estimated metres
 ```
 
-The video is undistorted **first**, so the person's trajectory and the scene
+Before raw-video processing, the pipeline cleans videos directly inside the
+configured source directory. Duplicate files and very short duration videos are moved to 
+`<source-dir>/deleted/duplicated/` and `<source-dir>/deleted/too_short/`, respectively.
+
+Then, the video is undistorted **first** (optional), so the person's trajectory and the scene
 are in the same geometry. What each script does is in
 [processing/README.md](processing/README.md).
 
