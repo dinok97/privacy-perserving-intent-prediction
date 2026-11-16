@@ -852,6 +852,8 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
         kin = {
             "vx": float(v[0]) if v is not None else None,
             "vy": float(v[1]) if v is not None else None,
+            "vx_bh_s": float(v[0]) / bh if v is not None and bh else None,
+            "vy_bh_s": float(v[1]) / bh if v is not None and bh else None,
             "speed_px_s": sp,
             "speed_bh_s": sp / bh if sp is not None and bh else None,
             "accel_bh_s2": accel / bh if accel is not None and bh else None,
@@ -916,6 +918,8 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
         elapsed = (closure_lag / fps if fps is not None else
                    t[i] - t[i - closure_lag] if i >= closure_lag else None)
         tr["closure_rate"] = calculate_closure_rate(tr["dist_px"], lagged_dist, elapsed)
+        # same rate in body heights per second (scale-free; carries no body size)
+        tr["closure_rate_bh_s"] = tr["closure_rate"] / bh if tr["closure_rate"] is not None and bh else None
         
         best_comp = comps[0]["align_deg"] if comps[0] else None
         most_aligned = None
@@ -1052,6 +1056,8 @@ CATALOG = [
     C("kin.speed_bh_s", "frame", "kin", "bh/s", [T], True, "Ground speed in body heights per second"),
     C("kin.vx", "frame", "kin", "px/s", [T], True, "Horizontal ground-point velocity; positive to the right"),
     C("kin.vy", "frame", "kin", "px/s", [T], True, "Vertical ground-point velocity; positive downward in image coordinates"),
+    C("kin.vx_bh_s", "frame", "kin", "bh/s", [T], True, "Horizontal ground-point velocity in body heights per second; positive to the right"),
+    C("kin.vy_bh_s", "frame", "kin", "bh/s", [T], True, "Vertical ground-point velocity in body heights per second; positive downward"),
     C("kin.accel_bh_s2", "frame", "kin", "bh/s^2", [T], True, "Change of speed"),
     C("kin.heading_deg", "frame", "kin", "deg", [T], True, "Walking direction in image"),
     C("kin.turn_rate_deg_s", "frame", "kin", "deg/s", [T], True, "Heading change rate"),
@@ -1075,6 +1081,7 @@ CATALOG = [
     C("scene_rel.occlusion_frac", "frame", "scene_rel", "0-1", [T, S], True, "Share of bbox overlapping wall/window/door"),
     C("scene_rel.target.dist_bh", "frame", "scene_rel", "bh", [T], True, "Distance to target door"),
     C("scene_rel.target.closure_rate", "frame", "scene_rel", "px/s", [T], True, "Target distance closed over the previous K frames; positive means approaching"),
+    C("scene_rel.target.closure_rate_bh_s", "frame", "scene_rel", "bh/s", [T], True, "closure_rate divided by the body-height reference; positive means approaching"),
     C("scene_rel.target.align_deg", "frame", "scene_rel", "deg", [T], True, "Angle between heading and direction to target"),
     C("scene_rel.target.align_center_deg", "frame", "scene_rel", "deg", [T], True, "Angle between heading and direction to the target's centre"),
     C("scene_rel.target.ttr_s", "frame", "scene_rel", "s", [T], True, "Time to reach target at current approach speed"),

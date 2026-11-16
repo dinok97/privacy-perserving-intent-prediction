@@ -35,6 +35,11 @@ optional `on_progress` argument and call on_progress() after each item, or
 on_progress(ok=False) after a failed one. Without it the step shows 0/n until
 it finishes.
 
+Privacy tiers: after the features, each clip also gets <clip>_features_F1..F4.json
+(cumulative tiers, privacy/strip_features.py) next to <clip>_features.json, plus one
+feature_catalog_private.json. pipeline_run.json lists the tiers written under
+"privacy_tiers". --no-privacy-tiers skips this; the script also runs alone.
+
 A clip that fails is logged, recorded in pipeline_run.json under
 "failed_clips" and skipped; the other clips continue. Use --fail-fast to stop
 at the first failing clip instead. Exit codes: 0 complete, 2 complete with
@@ -262,6 +267,8 @@ def log_summary(summary):
     level = {'complete': logging.INFO, 'failed': logging.ERROR}.get(summary['status'], logging.WARNING)
     logger.log(level, 'Pipeline %s - %d clip(s) ok, %d failed (%.1f s)', summary['status'],
                len(summary['clips']), len(failed), summary['duration_s'])
+    if summary.get('privacy_tiers'):
+        logger.info('Privacy tiers written: %s', ', '.join(summary['privacy_tiers']))
     for item in failed:
         logger.warning('  %s [%s]: %s', Path(item['video']).name, item['stage'], item['error'])
     if summary.get('log_file'):
@@ -419,6 +426,22 @@ def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=
     return result
 
 
+def run_privacy_tiers(clips):
+    """Write <clip>_features_F1/F2/F3/F4.json next to each <clip>_features.json.
+
+    clips: the per-clip results of run_feature_extractor. Returns [{'video','stage','error'}] for failures."""
+    from privacy import strip_features
+    failures = []
+    for clip in clips:
+        try:
+            for tier, path, _ in strip_features.write_tiers(clip['features']):
+                logger.debug('%s: %s written to %s', Path(clip['video']).name, tier, path)
+        except Exception as error:
+            logger.exception('%s: privacy tiers failed: %s', Path(clip['video']).name, error)
+            failures.append({'video': clip['video'], 'stage': 'privacy', 'error': f'{type(error).__name__}: {error}'})
+    return failures
+
+
 def delete_debug_files(records):
     """Remove temporary background and feature-debug files for each clip."""
     for record in records:
@@ -456,7 +479,8 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                  device='cpu', 
                  fail_fast=False, 
                  log_file=None,
-                 debug=False):
+                 debug=False,
+                 privacy_tiers=True):
     output = Path(output).resolve()
     if with_3d and ((output / 'tracks').exists() or any(
             not (workspace / '.depth-only').is_file() for workspace in output.glob('*/geometry_3d'))):
@@ -468,7 +492,7 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
     reused_tracking = processed_manifest is not None
     summary = {'status': 'running', 'with_3d': with_3d, 'reused_tracking': reused_tracking,
                'processed_manifest': None, 'log_file': str(log_file) if log_file else None,
-               'clips': [], 'failed_clips': []}
+               'privacy_tiers': [], 'clips': [], 'failed_clips': []}
     logger.debug('Pipeline started | output=%s | with_3d=%s | reused_tracking=%s | device=%s | fail_fast=%s',
                  output, with_3d, reused_tracking, device, fail_fast)
     t_start = time.perf_counter()
@@ -554,6 +578,15 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
         geometry.save(output / 'feature_catalog.json', {'schema_version': feature_extractor.SCHEMA_VERSION,
             'extensions': {'geometry_3d': '1.0'} if with_3d else {}, 'features': catalog})
         
+        if privacy_tiers:
+            from privacy import strip_features
+            with stage('Privacy tiers F1-F4', len(summary['clips'])) as progress:
+                for clip in summary['clips']:
+                    summary['failed_clips'] += run_privacy_tiers([clip])
+                    progress()
+            strip_features.write_private_catalog(output / 'feature_catalog.json')
+            summary['privacy_tiers'] = list(strip_features.PIPELINE_TIERS)
+
         if not debug:
             delete_debug_files(records=records)
             delete_undistorted_results(source_dir)
@@ -595,6 +628,8 @@ def main():
                         help='Also print the raw output of the submodules (YOLO, SAM3, undistort) to the console')
     parser.add_argument('--debug', action='store_true',
                         help='Keep private debug files, including background images and temporary undistorted videos')
+    parser.add_argument('--no-privacy-tiers', action='store_true',
+                        help='Do not write the <clip>_features_F1/F2/F3/F4.json files (privacy/strip_features.py can make them later)')
     args = parser.parse_args()
     
     CAPTURE_OUTPUT = not args.show_output
@@ -616,6 +651,7 @@ def main():
                 fail_fast=args.fail_fast, 
                 log_file=log_file,
                 debug=args.debug,
+                privacy_tiers=not args.no_privacy_tiers,
             )
     except Exception:
         sys.exit(1)  # already logged with traceback
