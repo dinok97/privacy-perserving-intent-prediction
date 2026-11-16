@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 from geometry3d import pipeline_geometry as geometry
 import pipeline
+from processing import clean_datasource
 from processing import video_processor
 
 
@@ -107,6 +108,26 @@ class PipelineCleanupContracts(unittest.TestCase):
     def test_missing_temporary_undistorted_results_directory_is_ok(self):
         pipeline.delete_undistorted_results(self.root)
 
+    def test_source_cleanup_runs_before_raw_video_discovery(self):
+        source = self.root / 'source'
+        source.mkdir()
+        events = []
+
+        def cleanup(source_dir):
+            events.append(('clean', Path(source_dir)))
+            return {'duplicates': [], 'too_short': []}
+
+        def list_videos(source_dir):
+            events.append(('list', Path(source_dir)))
+            return []
+
+        with patch.object(clean_datasource, 'clean_videos', side_effect=cleanup):
+            with patch.object(pipeline, 'list_videos', side_effect=list_videos):
+                with self.assertRaisesRegex(ValueError, 'No input videos'):
+                    pipeline.run_pipeline(source_dir=source, output=self.root / 'output')
+
+        self.assertEqual(events, [('clean', source.resolve()), ('list', source.resolve())])
+
     def test_3d_run_rejects_legacy_output(self):
         (self.root / 'old-clip' / 'geometry_3d').mkdir(parents=True)
         with self.assertRaisesRegex(ValueError, 'fresh --output'):
@@ -127,9 +148,10 @@ class PipelineCleanupContracts(unittest.TestCase):
             (tracks / 'clip.mp4').write_bytes(b'private clip')
             raise RuntimeError('Tracking failed')
 
-        with patch.object(pipeline, 'run_trajectory_tracker', side_effect=failed_tracker):
-            with self.assertLogs('pipeline', level='ERROR'), self.assertRaisesRegex(RuntimeError, 'Tracking failed'):
-                pipeline.run_pipeline(source_dir=source, output=output, with_3d=True, skip_undistort=True)
+        with patch.object(clean_datasource, 'clean_videos', return_value={'duplicates': [], 'too_short': []}):
+            with patch.object(pipeline, 'run_trajectory_tracker', side_effect=failed_tracker):
+                with self.assertLogs('pipeline', level='ERROR'), self.assertRaisesRegex(RuntimeError, 'Tracking failed'):
+                    pipeline.run_pipeline(source_dir=source, output=output, with_3d=True, skip_undistort=True)
         self.assertEqual(len(staging), 1)
         self.assertFalse(staging[0].exists())
         self.assertFalse(any(output.rglob('*.mp4')))

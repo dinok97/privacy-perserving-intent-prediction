@@ -317,6 +317,15 @@ def run_trajectory_tracker(videos, source_dir, output, manifest, device, progres
     return result
 
 
+def clean_source_videos(source_dir):
+    """Remove duplicate and too-short videos before raw input discovery."""
+    from processing.clean_datasource import clean_videos
+
+    result = clean_videos(source_dir)
+    logger.info('Video cleanup - moved %d duplicate(s) and %d too-short video(s) to deleted/ directory',
+                len(result['duplicates']), len(result['too_short']))
+
+
 def run_background_extractor(records, progress, fail_fast=False):
     """Median background per clip and a check of existing scene files.
 
@@ -500,6 +509,7 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
     records = []
     try:
         if processed_manifest is None:
+            clean_source_videos(source_dir)
             videos = list_videos(source_dir)
             if not videos:
                 raise ValueError(f'No input videos found in {source_dir}')

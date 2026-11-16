@@ -8,11 +8,14 @@
 /validation_report/
 # Existing checkouts may still contain private assets under the old layout.
 /video_processing/
-/source/*.png
-/source/*.jpg
-/source/*.jpeg
+/source/**/*.png
+/source/**/*.jpg
+/source/**/*.jpeg
 /source/**/*.json
-/source/*.json
+/source/**/*.json
+/source/**/*.Identifier
+/source/**/*.txt    
+/source/**/*.csv
 
 # Recordings and model weights anywhere in the repository.
 *.mp4
