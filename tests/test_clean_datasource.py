@@ -47,11 +47,31 @@ class CleanVideos(unittest.TestCase):
 
         self.assertEqual(result['duplicates'], [self.source / 'deleted/duplicated/b.mp4'])
         self.assertEqual(result['too_short'], [self.source / 'deleted/too_short/short.MKV'])
+        self.assertEqual(result['low_fps'], [])
         self.assertTrue(kept.exists())
         self.assertTrue(boundary.exists())
         self.assertTrue(nested.exists())
         self.assertFalse(duplicate.exists())
         self.assertFalse(short.exists())
+
+    def test_moves_videos_below_five_fps_but_keeps_boundary(self):
+        low_fps = self.video('low.mp4', b'low fps')
+        boundary = self.video('boundary.mp4', b'five fps')
+
+        def capture_for(path):
+            capture = Mock()
+            capture.isOpened.return_value = True
+            fps = 4.9 if Path(path).name == 'low.mp4' else 5.0
+            capture.get.side_effect = lambda prop: (
+                fps * 2 if prop == clean_datasource.cv2.CAP_PROP_FRAME_COUNT else fps)
+            return capture
+
+        with patch.object(clean_datasource.cv2, 'VideoCapture', side_effect=capture_for):
+            result = clean_datasource.clean_videos(self.source)
+
+        self.assertEqual(result['low_fps'], [self.source / 'deleted/low_fps/low.mp4'])
+        self.assertTrue(boundary.exists())
+        self.assertFalse(low_fps.exists())
 
     def test_unreadable_video_raises_without_moving_it(self):
         video = self.video('broken.mp4', b'not a video')

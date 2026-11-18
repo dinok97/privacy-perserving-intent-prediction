@@ -115,7 +115,7 @@ class PipelineCleanupContracts(unittest.TestCase):
 
         def cleanup(source_dir):
             events.append(('clean', Path(source_dir)))
-            return {'duplicates': [], 'too_short': []}
+            return {'duplicates': [], 'too_short': [], 'low_fps': []}
 
         def list_videos(source_dir):
             events.append(('list', Path(source_dir)))
@@ -148,7 +148,8 @@ class PipelineCleanupContracts(unittest.TestCase):
             (tracks / 'clip.mp4').write_bytes(b'private clip')
             raise RuntimeError('Tracking failed')
 
-        with patch.object(clean_datasource, 'clean_videos', return_value={'duplicates': [], 'too_short': []}):
+        with patch.object(clean_datasource, 'clean_videos', return_value={
+            'duplicates': [], 'too_short': [], 'low_fps': []}):
             with patch.object(pipeline, 'run_trajectory_tracker', side_effect=failed_tracker):
                 with self.assertLogs('pipeline', level='ERROR'), self.assertRaisesRegex(RuntimeError, 'Tracking failed'):
                     pipeline.run_pipeline(source_dir=source, output=output, with_3d=True, skip_undistort=True)

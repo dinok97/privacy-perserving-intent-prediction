@@ -6,7 +6,7 @@ repository root.
 
 | Step | File | What it does | Main output |
 |---|---|---|---|
-| 1 | `clean_datasource.py` | Moves duplicate videos and very short videos (time is configurable) out of the input folder. | `<source-dir>/deleted/duplicated/`, `<source-dir>/deleted/too_short/` |
+| 1 | `clean_datasource.py` | Moves duplicate , too short, and low FPS videos out of the input folder. | `<source-dir>/deleted/duplicated/`, `<source-dir>/deleted/too_short/`, `<source-dir>/deleted/low_fps/` |
 | 2 | `fisheye_correction.py` | Checks if the video has fisheye distortion and undistorts it if so. | `<video>_undistorted.mp4`, `<video>_lens.json` |
 | 3 | `video_processor.py` | Tracks people (YOLO pose), cuts one clip per person and labels it enter / pass / exit. Based on Jesper's code. | `<clip>.mp4`, `<clip>.json` (trajectory + keypoints), `<clip>_pose.json` |
 | 4 | `background_extraction.py` | Makes an image of the empty room by masking out people and taking the median over frames. Pixelates anyone still visible. | `<clip>_background.png` |
@@ -21,10 +21,11 @@ output of the previous one.
 
 - **Undistort first.** Steps 3–6 use the undistorted video, so the person and
   the scene are in the same geometry.
-- **Clean first.** The pipeline moves duplicate and sub-0.5-second videos
-  from the root of the configured source directory into its `deleted/`
-  subfolders. Nested directories are not scanned. Run the cleaner by itself
-  with `python processing/clean_datasource.py --source-dir DIR`.
+- **Clean first.** The pipeline moves duplicates, videos under 0.5 seconds,
+  and videos below 5 FPS from the root of the configured source directory
+  into `deleted/duplicated/`, `deleted/too_short/`, and `deleted/low_fps/`.
+  Nested directories are not scanned. Run the cleaner by itself with
+  `python processing/clean_datasource.py --source-dir DIR`.
 - **Settings** (thresholds, model, device) are constants at the top of each file.
 - **Labels** are stored inside `<clip>.json` and in `clips.csv`. Fix a wrong
   label by filling in `manual_label` in `clips.csv`.

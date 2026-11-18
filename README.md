@@ -62,8 +62,9 @@ video
 ```
 
 Before raw-video processing, the pipeline cleans videos directly inside the
-configured source directory. Duplicate files and very short duration videos are moved to 
-`<source-dir>/deleted/duplicated/` and `<source-dir>/deleted/too_short/`, respectively.
+configured source directory. Duplicate files, videos that are too short, and
+videos that has low FPS are moved to `<source-dir>/deleted/duplicated/`,
+`<source-dir>/deleted/too_short/`, and `<source-dir>/deleted/low_fps/`, respectively.
 
 Then, the video is undistorted **first** (optional), so the person's trajectory and the scene
 are in the same geometry. What each script does is in

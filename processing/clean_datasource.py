@@ -1,4 +1,4 @@
-"""Move duplicate and very short source videos out of the pipeline input folder."""
+"""Move duplicate, very short, and low-FPS videos out of the pipeline input folder."""
 import argparse
 import hashlib
 import logging
@@ -10,6 +10,8 @@ import cv2
 
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.m4v'}
 MIN_DURATION_SECONDS = 0.5
+MIN_FRAME_RATE = 5.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,8 +23,8 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def video_duration_seconds(path):
-    """Return duration from the video frame count and FPS, or raise if unreadable."""
+def _video_info(path):
+    """Return duration and FPS from video metadata, or raise if unreadable."""
     capture = cv2.VideoCapture(str(path))
     try:
         if not capture.isOpened():
@@ -32,9 +34,15 @@ def video_duration_seconds(path):
         if (not math.isfinite(frame_count) or not math.isfinite(fps)
                 or frame_count <= 0 or fps <= 0):
             raise RuntimeError(f'Video has invalid frame count or FPS: {path}')
-        return frame_count / fps
+        return frame_count / fps, fps
     finally:
         capture.release()
+
+
+def video_duration_seconds(path):
+    """Return duration from the video frame count and FPS, or raise if unreadable."""
+    duration, _ = _video_info(path)
+    return duration
 
 
 def _move_to_category(video, category_dir):
@@ -46,10 +54,11 @@ def _move_to_category(video, category_dir):
 
 
 def clean_videos(source_dir, *, min_duration=MIN_DURATION_SECONDS):
-    """Move duplicate and short videos from the source root into deleted folders.
+    """Move duplicate, short, and low-FPS videos from the source root.
 
     Nested directories are not scanned. For identical files, the first filename
-    in sorted order is kept in the source directory.
+    in sorted order is kept in the source directory. Videos below 5 FPS are
+    moved to ``deleted/low_fps``.
     """
     source_dir = Path(source_dir)
     if not source_dir.is_dir():
@@ -61,6 +70,7 @@ def clean_videos(source_dir, *, min_duration=MIN_DURATION_SECONDS):
     seen_hashes = set()
     duplicates = []
     too_short = []
+    low_fps = []
 
     videos = sorted(
         (path for path in source_dir.iterdir()
@@ -69,6 +79,8 @@ def clean_videos(source_dir, *, min_duration=MIN_DURATION_SECONDS):
     )
     for video in videos:
         digest = file_sha256(video)
+        
+        # Check for duplicates by comparing SHA-256 hashes
         if digest in seen_hashes:
             moved = _move_to_category(video, deleted_dir / 'duplicated')
             duplicates.append(moved)
@@ -76,14 +88,23 @@ def clean_videos(source_dir, *, min_duration=MIN_DURATION_SECONDS):
             continue
         seen_hashes.add(digest)
 
-        duration = video_duration_seconds(video)
+        duration, fps = _video_info(video)
+        # Check for low FPS and short duration
+        if fps < MIN_FRAME_RATE:
+            moved = _move_to_category(video, deleted_dir / 'low_fps')
+            low_fps.append(moved)
+            print(f'Moved low-FPS video ({fps:.3f} FPS): {moved}')
+            continue
+        
+        # Check for short duration
         if duration < min_duration:
             moved = _move_to_category(video, deleted_dir / 'too_short')
             too_short.append(moved)
             print(f'Moved short video ({duration:.3f} s): {moved}')
 
-    print(f'Video cleanup complete: {len(duplicates)} duplicate(s), {len(too_short)} too-short video(s)')
-    return {'duplicates': duplicates, 'too_short': too_short}
+    print(f'Video cleanup complete: {len(duplicates)} duplicate(s), '
+          f'{len(too_short)} too-short video(s), {len(low_fps)} low-FPS video(s)')
+    return {'duplicates': duplicates, 'too_short': too_short, 'low_fps': low_fps}
 
 
 def main():
