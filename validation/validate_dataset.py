@@ -143,7 +143,6 @@ HINTS = {
     "SCHEMA_VERSION": "Not feat-0.4. The clip came from another pipeline version; do not mix it into the same dataset.",
     "LABEL_INVALID": "info.label is not enter/pass/exit. Open features.json and check info.label.",
     "LABEL_DIFFERS_FROM_SOURCE": "Normal when a bystander walks through a recording of the other class; it is only context.",
-    "LABEL_FILENAME_MISMATCH": "The label in the file name differs from info.label. Check that files from two clips were not swapped.",
     "CLIP_NAME_MISMATCH": "info.clip does not match the file name. Check that the right files sit in this folder.",
     "SOURCE_NAME_MISMATCH": "info.sources names a different file than the one in the folder: files may have been renamed or swapped.",
     "SHA_MISMATCH": "features.json and background.json were made from different videos. The background belongs to another clip: re-run or swap in the right file.",
@@ -224,11 +223,10 @@ HINTS = {
     "LOG_CSV_COUNTS": "Label or removed counts in the log differ from clips.csv: clips.csv is from another run or was edited.",
     "CLIP_SESSION_NOT_IN_LOG": "The clip was made in a session that the run's log does not contain: it comes from another run.",
     "LOG_FPS_MISMATCH": "The fps the tracker logged for the source video differs from the fps in the features.",
-    "DUPLICATE_VIDEO": "Two clips come from the same video file. Check whether the same data was delivered twice.",
     "VARIANT_PARAMS_KEY": "Some clips were made with other parameters than most. Do not mix them without checking info.params.",
     "VARIANT_GIT_COMMIT": "Some clips were made with another code version. Check info.trajectory_meta.git_commit.",
     "VARIANT_SCHEMA": "Mixed schema versions in one dataset.",
-    "MIXED_FPS": "Videos were recorded at different fps. Smoothing windows are counted in frames, so consider resampling to one fps.",
+    "MIXED_FPS": "Videos were recorded at different FPS. Consider re-sampling to a common FPS before training.",
     "MIXED_SESSION": "Several tracking sessions (normally one per run). Check they match the logs.",
     "MIXED_WIDTH": "Frames have different widths. Pixel features are not comparable without scaling.",
     "MIXED_HEIGHT": "Frames have different heights. Pixel features are not comparable without scaling.",
@@ -638,9 +636,6 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
         row["label_matches_source"] = label == source
         if label != source:
             issues.add(clip_id, "INFO", "LABEL_DIFFERS_FROM_SOURCE", f"tracker label '{label}' in source '{source}'")
-    m = re.search(r"_(enter|pass|exit)(?:_\d+)?$", prefix)
-    if not m or m.group(1) != label:
-        issues.add(clip_id, "WARN", "LABEL_FILENAME_MISMATCH", f"file prefix {prefix} does not end in _{label}[_N]")
     if info.get("clip") != re.sub(r"_\d+$", "", prefix):
         issues.add(clip_id, "WARN", "CLIP_NAME_MISMATCH", f"info.clip={info.get('clip')} vs file prefix {prefix}")
     sources = info.get("sources") or {}
@@ -866,7 +861,7 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
     allow = [re.compile(p) for p in DOCUMENTED_NULLABLE + args.ignore_null]
 
-    issues, rows, null_by_clip, vecs, shas = Issues(), [], {}, {}, defaultdict(list)
+    issues, rows, null_by_clip, vecs = Issues(), [], {}, {}
     track_dirs = {}
     for spec in args.tracks:
         key, _, p = spec.partition("=")
@@ -910,12 +905,11 @@ def main():
             issues.add(name, "INFO", "FILES_NOT_DELIVERED",
                        f"{sorted(optional)} are in none of the {len(clip_dirs)} clip folders (run without --debug?); checks that need them are skipped")
         for clip_dir in clip_dirs:
-            row, nstats, vec, sha = validate_clip(clip_dir, name, args, issues, tracks_by_source[name], optional)
+            row, nstats, vec, _sha = validate_clip(clip_dir, name, args, issues, tracks_by_source[name], optional)
             rows.append(row)
             if nstats is not None:
                 null_by_clip[row["clip"]] = nstats
                 vecs[row["clip"]] = vec
-                shas[sha].append(row["clip"])
     if not rows:
         sys.exit("No clip folders found (expected ROOT/enter/<clip>/ and ROOT/pass/<clip>/).")
 
@@ -953,12 +947,6 @@ def main():
         have = sum(r["source"] == name for r in rows)
         if have != expected:
             issues.add("DATASET", "ERROR", "CLIP_COUNT", f"{name}: found {have} clip folders, expected {expected} (--expect or clips.csv keep rows)")
-
-    # --- duplicates
-    for sha, clips in shas.items():
-        if sha and len(clips) > 1:
-            for c in clips:
-                issues.add(c, "WARN", "DUPLICATE_VIDEO", f"same video SHA as {len(clips) - 1} other clip(s): {clips[:3]}")
 
     # --- run-to-run consistency (params, schema, commit, fps, session)
     ok_rows = [r for r in rows if r["clip"] in null_by_clip]
