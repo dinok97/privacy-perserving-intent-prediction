@@ -76,6 +76,7 @@ REACH_BH = 0.5
 AREA_TOL = 0.03
 AREA_SUM_MAX = 1.15
 CLUSTER_TOL = 0.04
+SEVERITY_RANK = {"ERROR": 0, "WARN": 1, "INFO": 2}
 
 
 # Nulls that FEATURES.md says are by design, or that are structural in the sample files
@@ -93,59 +94,6 @@ NON_NEGATIVE = {"bbox_h_px", "body_height_px", "leg_length_bh", "shoulder_width_
                 "ankle_sep_bh", "wrist_spread_bh", "ttr_s", "tau_s", "bh_ref_px"}
 OUTLIER_STATS = ["n_frames", "detection_rate", "duration_s", "floor_frac", "wall_frac", "door_frac",
                  "brightness_mean", "n_exits", "path_length_bh", "mean_speed_bh_s"]
-
-
-# ----------------------------------------------------------------------------- helpers
-
-def png_size(path):
-    """(width, height) from the PNG header, or None if it is not a PNG."""
-    with open(path, "rb") as f:
-        head = f.read(24)
-    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
-        return None
-    return struct.unpack(">II", head[16:24])
-
-
-def leaves(obj, path=""):
-    """Yield (path, value) for every leaf. List indices are collapsed to '[]'."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from leaves(v, f"{path}.{k}" if path else str(k))
-    elif isinstance(obj, list):
-        for v in obj:
-            yield from leaves(v, path + "[]")
-    else:
-        yield path, obj
-
-
-def number_rule(path):
-    """(low, high) a numeric leaf must stay within, or None. Tolerance is added by the caller."""
-    name = path.replace("[]", "").split(".")[-1]
-    if name.endswith(("_frac", "_norm")) or name in UNIT_INTERVAL:
-        return 0.0, 1.0
-    if name == "n_kp_visible":
-        return 0, 17
-    if name.startswith(("speed_", "dist_")) or name in NON_NEGATIVE:
-        return 0.0, math.inf
-    if name.endswith("_deg"):
-        return -360.0, 360.0
-    return None
-
-
-def shoelace(poly):
-    """Area of a polygon (list of (x, y) points) using the shoelace formula."""
-    area = 0.0
-    for i, (x1, y1) in enumerate(poly):
-        x2, y2 = poly[(i + 1) % len(poly)]
-        area += x1 * y2 - x2 * y1
-    return abs(area) / 2
-
-
-def robust_z(values):
-    """Median and median absolute deviation of a list of numbers."""
-    med = statistics.median(values)
-    mad = statistics.median(abs(v - med) for v in values)
-    return med, mad
 
 
 # What to look for, per issue code (shown in summary.md and issues.csv)
@@ -254,6 +202,59 @@ HINTS = {
     "UNUSUAL_NULLS": "Features that are normally filled are empty in this clip (listed in the message). Open the clip's debug image: usually no pose or poor detection.",
     "OUTLIER": "A number far from the rest of the dataset. Open the clip and check whether it is real or a pipeline problem.",
 }
+
+
+# ----------------------------------------------------------------------------- helpers
+
+def png_size(path):
+    """(width, height) from the PNG header, or None if it is not a PNG."""
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return struct.unpack(">II", head[16:24])
+
+
+def leaves(obj, path=""):
+    """Yield (path, value) for every leaf. List indices are collapsed to '[]'."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from leaves(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from leaves(v, path + "[]")
+    else:
+        yield path, obj
+
+
+def number_rule(path):
+    """(low, high) a numeric leaf must stay within, or None. Tolerance is added by the caller."""
+    name = path.replace("[]", "").split(".")[-1]
+    if name.endswith(("_frac", "_norm")) or name in UNIT_INTERVAL:
+        return 0.0, 1.0
+    if name == "n_kp_visible":
+        return 0, 17
+    if name.startswith(("speed_", "dist_")) or name in NON_NEGATIVE:
+        return 0.0, math.inf
+    if name.endswith("_deg"):
+        return -360.0, 360.0
+    return None
+
+
+def shoelace(poly):
+    """Area of a polygon (list of (x, y) points) using the shoelace formula."""
+    area = 0.0
+    for i, (x1, y1) in enumerate(poly):
+        x2, y2 = poly[(i + 1) % len(poly)]
+        area += x1 * y2 - x2 * y1
+    return abs(area) / 2
+
+
+def robust_z(values):
+    """Median and median absolute deviation of a list of numbers."""
+    med = statistics.median(values)
+    mad = statistics.median(abs(v - med) for v in values)
+    return med, mad
 
 
 def hint(code):
@@ -594,9 +595,8 @@ def check_tracks(clip_dir, clip_id, prefix, info, label, frames, W, H, sha_f, tr
 
 # ----------------------------------------------------------------------------- one clip
 
-def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozenset()):
-    clip_id = f"{source}/{clip_dir.name}"
-    row = {"clip": clip_id, "source": source}
+def check_clip_files(clip_dir, clip_id, issues, optional):
+    """Find the expected files and check basic file and image integrity."""
     found = {}
     for role, suffix in FILES.items():
         match = [p for p in clip_dir.iterdir() if p.is_file() and p.name.endswith(suffix)]
@@ -612,8 +612,6 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
     extra = {p.name for p in clip_dir.iterdir()} - {p.name for p in found.values()}
     if extra:
         issues.add(clip_id, "INFO", "FILE_EXTRA", ", ".join(sorted(extra)))
-    row["n_files_ok"] = len(found)
-
     sizes = {}
     for role in ("background_img", "overlay_img", "debug_img"):
         if role in found and found[role].stat().st_size:
@@ -624,6 +622,14 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
     if len({s for s in sizes.values() if s}) > 1:
         issues.add(clip_id, "ERROR", "IMAGE_SIZE_MISMATCH", f"image sizes differ: {sizes}")
 
+    return found, sizes, len(found)
+
+
+def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozenset()):
+    clip_id = f"{source}/{clip_dir.name}"
+    row = {"clip": clip_id, "source": source}
+    found, sizes, n_files_ok = check_clip_files(clip_dir, clip_id, issues, optional)
+    row["n_files_ok"] = n_files_ok
     if "features" not in found:
         return row, None, None, None
     feat = load_json(found["features"], clip_id, issues)
@@ -829,7 +835,472 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
 
 # ----------------------------------------------------------------------------- dataset
 
-def main():
+def resolve_sources(args):
+    """Parse NAME=PATH source arguments and validate their paths."""
+    sources = {}
+    for spec in args.sources:
+        name, _, path_text = spec.partition("=") if "=" in spec else (None, "", spec)
+        path = Path(path_text)
+        name = name or path.resolve().name
+        if not path.is_dir():
+            sys.exit(f"Not a folder: {path}")
+        if name in sources:
+            sys.exit(f"Two sources are called '{name}'; rename one with NAME=PATH.")
+        sources[name] = path
+    return sources
+
+
+def resolve_expectations(args, sources):
+    """Parse --expect values and reject names or counts that are invalid."""
+    expect = {}
+    for spec in args.expect:
+        key, _, num = spec.partition("=")
+        if key not in sources or not num.isdigit():
+            sys.exit(f"--expect needs NAME=N with NAME in {sorted(sources)}, got '{spec}'")
+        expect[key] = int(num)
+    return expect
+
+
+def load_tracks_by_source(args, sources, issues):
+    """Load tracker rows for every source and return them by source name."""
+    track_dirs = {}
+    for spec in args.tracks:
+        key, _, path_text = spec.partition("=")
+        if key not in sources or not path_text:
+            sys.exit(f"--tracks needs NAME=PATH with NAME in {sorted(sources)}, got '{spec}'")
+        track_dirs[key] = Path(path_text)
+
+    tracks_by_source = {}
+    for name, path in sources.items():
+        tracks_dir = track_dirs.get(name, path / "tracks")
+        if args.no_tracks or not tracks_dir.is_dir():
+            tracks_by_source[name] = None
+            if not args.no_tracks:
+                issues.add(name, "INFO", "NO_TRACKS",
+                           f"{tracks_dir} not found: cross-checks against clips.csv/trajectories skipped")
+            continue
+        tracks_by_source[name] = load_tracks(tracks_dir, name, issues)
+        if not tracks_by_source[name]:
+            issues.add(name, "ERROR", "TRACKS_EMPTY", f"no clips.csv rows found under {tracks_dir}")
+    return tracks_by_source
+
+
+def load_logs(args, sources):
+    """Load pipeline logs for every source and return parsed runs by source name."""
+    log_dirs = {}
+    for spec in args.logs:
+        key, _, path_text = spec.partition("=")
+        if key not in sources or not path_text:
+            sys.exit(f"--logs needs NAME=PATH with NAME in {sorted(sources)}, got '{spec}'")
+        log_dirs[key] = Path(path_text)
+
+    logs_by_source = {}
+    for name, path in sources.items():
+        logs_dir = log_dirs.get(name, path / "logs")
+        logs_by_source[name] = None
+        if not args.no_logs and logs_dir.is_dir():
+            logs_by_source[name] = [parse_log(p) for p in sorted(logs_dir.glob("*.log"))]
+    return logs_by_source, log_dirs
+
+
+def validate_sources(args, sources, tracks_by_source, issues):
+    """Validate every clip folder and collect report, null, and scene data."""
+    rows, null_by_clip, vecs = [], {}, {}
+    for name, path in sources.items():
+        clip_dirs = [p for p in sorted(path.iterdir())
+                     if p.is_dir() and p.name not in SKIP_DIRS and not p.name.startswith("[TEMP]")]
+        if not clip_dirs:
+            issues.add(name, "ERROR", "SOURCE_EMPTY", f"no clip folders in {path}")
+
+        present = Counter()
+        for clip_dir in clip_dirs:
+            names = [p.name for p in clip_dir.iterdir() if p.is_file()]
+            for role, suffix in FILES.items():
+                present[role] += any(name.endswith(suffix) for name in names)
+
+        optional = frozenset(role for role in FILES
+                             if role != "features" and clip_dirs and present[role] == 0)
+        if optional:
+            issues.add(name, "INFO", "FILES_NOT_DELIVERED",
+                       f"{sorted(optional)} are in none of the {len(clip_dirs)} clip folders "
+                       "(run without --debug?); checks that need them are skipped")
+
+        for clip_dir in clip_dirs:
+            row, null_stats, vec, _sha = validate_clip(
+                clip_dir, name, args, issues, tracks_by_source[name], optional)
+            rows.append(row)
+            if null_stats is not None:
+                null_by_clip[row["clip"]] = null_stats
+                vecs[row["clip"]] = vec
+
+    if not rows:
+        sys.exit("No clip folders found (expected ROOT/enter/<clip>/ and ROOT/pass/<clip>/).")
+    return rows, null_by_clip, vecs
+
+
+def check_tracker_folders(tracks_by_source, logs_by_source, rows, issues, expect):
+    """Compare tracker keep rows with delivered folders and build CSV statistics."""
+    csv_stats = {}
+    for name, tracks in tracks_by_source.items():
+        if not tracks:
+            continue
+        run = chosen_run(logs_by_source.get(name))
+        run_sessions = set(run["sessions"]) if run else set()
+        mine = {clip_id: row for clip_id, row in tracks.items()
+                if not run_sessions or str(row.get("session_id")).rsplit("_", 1)[-1] in run_sessions}
+        if len(mine) != len(tracks):
+            issues.add(name, "INFO", "CSV_STALE_ROWS",
+                       f"{len(tracks) - len(mine)} clips.csv row(s) belong to sessions that are not in {run['file']}; ignored")
+
+        keep = {clip_id for clip_id, row in mine.items()
+                if row.get("cleaning_result") == "keep"}
+        present = {row.get("clip_key") for row in rows if row["source"] == name}
+        for clip_id in sorted(keep - present):
+            issues.add(f"{name}/{clip_id}", "ERROR", "CLIP_FOLDER_MISSING",
+                       "clips.csv marks it keep but no clip folder was found")
+
+        csv_stats[name] = {
+            "keep": len(keep),
+            "removed": len(mine) - len(keep),
+            "stale": len(tracks) - len(mine),
+            "by_label": Counter((row.get("label"), row.get("cleaning_result")) for row in mine.values()),
+            "reasons": Counter(row.get("cleaning_reason") for row in mine.values()
+                               if row.get("cleaning_result") != "keep"),
+            "manual": sum(bool((row.get("manual_label") or "").strip()) for row in mine.values()),
+        }
+        expect.setdefault(name, len(keep))
+    return csv_stats
+
+
+def check_completeness(expect, rows, issues):
+    """Check delivered clip counts against expectations and tracker keep rows."""
+    for name, expected in expect.items():
+        have = sum(row["source"] == name for row in rows)
+        if have != expected:
+            issues.add("DATASET", "ERROR", "CLIP_COUNT",
+                       f"{name}: found {have} clip folders, expected {expected} (--expect or clips.csv keep rows)")
+
+
+def check_dataset_consistency(rows, null_by_clip, issues):
+    """Detect mixed parameters, versions, dimensions, fps, and sessions."""
+    ok_rows = [row for row in rows if row["clip"] in null_by_clip]
+    for field, severity in (("params_key", "ERROR"), ("git_commit", "WARN"), ("schema", "ERROR")):
+        counts = Counter(row.get(field) for row in ok_rows)
+        if len(counts) > 1:
+            main_value, main_count = counts.most_common(1)[0]
+            for row in ok_rows:
+                if row.get(field) != main_value:
+                    issues.add(row["clip"], severity, f"VARIANT_{field.upper()}",
+                               f"differs from the most common value ({main_count} clips)")
+
+    for field in ("fps", "session", "width", "height"):
+        counts = Counter(row.get(field) for row in ok_rows)
+        if len(counts) > 1:
+            issues.add("DATASET", "INFO", f"MIXED_{field.upper()}", f"{dict(counts)}")
+    return ok_rows
+
+
+def check_feature_nulls(args, rows, null_by_clip, issues, allow):
+    """Summarize feature null rates and flag clips with unusual null patterns."""
+    per_path = defaultdict(list)
+    label_of = {row["clip"]: row.get("label") for row in rows}
+    for clip, stats in null_by_clip.items():
+        for path, (null_count, total_count) in stats.items():
+            if total_count >= args.min_frames_for_nulls:
+                per_path[path].append((clip, null_count / total_count, label_of[clip]))
+
+    null_rows, flagged_per_clip = [], defaultdict(list)
+    for path, items in sorted(per_path.items()):
+        fracs = [fraction for _, fraction, _ in items]
+        typical = statistics.median(fracs)
+        high = [(clip, fraction) for clip, fraction, _ in items
+                if fraction > args.null_threshold]
+        documented = any(pattern.search(path) for pattern in allow)
+        structural = typical > args.null_threshold
+        total_null = sum(null_by_clip[clip][path][0] for clip, _, _ in items)
+        total_frames = sum(null_by_clip[clip][path][1] for clip, _, _ in items)
+
+        by_label = {}
+        for label in ("enter", "pass", "exit"):
+            label_null = sum(null_by_clip[clip][path][0]
+                             for clip, _, clip_label in items if clip_label == label)
+            label_frames = sum(null_by_clip[clip][path][1]
+                               for clip, _, clip_label in items if clip_label == label)
+            by_label[label] = round(label_null / label_frames, 3) if label_frames else None
+
+        status = ("ALWAYS_NULL" if total_null == total_frames
+                  else "MOSTLY_NULL" if structural
+                  else "SOMETIMES_HIGH" if high else "ok")
+        null_rows.append({
+            "feature": path,
+            "pooled_null_rate": round(total_null / total_frames, 3),
+            "median_clip_null_rate": round(typical, 3),
+            "null_rate_enter": by_label["enter"],
+            "null_rate_pass": by_label["pass"],
+            "null_rate_exit": by_label["exit"],
+            "clips": len(items),
+            "clips_over_threshold": len(high),
+            "documented_nullable": documented,
+            "status": status,
+        })
+
+        if status == "ALWAYS_NULL" and not documented:
+            issues.add("DATASET", "WARN", "FEATURE_ALWAYS_NULL",
+                       f"{path} is null in every detected frame of every clip")
+        elif status == "MOSTLY_NULL" and not documented:
+            issues.add("DATASET", "WARN", "FEATURE_MOSTLY_NULL",
+                       f"{path}: median clip null rate {typical:.0%} (dataset-wide, not one clip)")
+        if not documented and not structural:
+            for clip, fraction in high:
+                flagged_per_clip[clip].append((path, fraction))
+
+    for clip, items in flagged_per_clip.items():
+        items.sort(key=lambda item: -item[1])
+        text = "; ".join(f"{path} {fraction:.0%}" for path, fraction in items[:8])
+        if len(items) > 8:
+            text += f" (+{len(items) - 8} more)"
+        issues.add(clip, "WARN", "UNUSUAL_NULLS",
+                   f"{len(items)} feature(s) null in >{args.null_threshold:.0%} of frames: {text}")
+
+    for row in rows:
+        items = flagged_per_clip.get(row["clip"], [])
+        row["n_unusual_null_features"] = len(items)
+        row["unusual_null_features"] = "; ".join(
+            path for path, _ in sorted(items, key=lambda item: -item[1])[:8])
+    return null_rows
+
+
+def assign_scene_clusters(args, rows, vecs):
+    """Assign simple scene-fingerprint groups for the report."""
+    centers, assign = [], {}
+    for clip in sorted(vecs):
+        vec = vecs[clip]
+        for index, center in enumerate(centers):
+            if max(abs(a - b) for a, b in zip(vec, center)) <= args.cluster_tol:
+                assign[clip] = index
+                break
+        else:
+            centers.append(vec)
+            assign[clip] = len(centers) - 1
+    for row in rows:
+        row["scene_cluster"] = assign.get(row["clip"])
+    return centers
+
+
+def check_outliers(ok_rows, issues):
+    """Add robust-z context for unusually large or small dataset values."""
+    if len(ok_rows) < 20:
+        return
+    for stat in OUTLIER_STATS:
+        values = [(row["clip"], row[stat]) for row in ok_rows
+                  if isinstance(row.get(stat), (int, float))]
+        if len(values) < 20:
+            continue
+        median, mad = robust_z([value for _, value in values])
+        if mad == 0:
+            continue
+        for clip, value in values:
+            z_score = 0.6745 * (value - median) / mad
+            if abs(z_score) > 5:
+                issues.add(clip, "INFO", "OUTLIER",
+                           f"{stat}={value} (dataset median {median:.3g}, robust z={z_score:.1f})")
+
+
+def check_pipeline_logs(args, sources, log_dirs, logs_by_source, rows, csv_stats, issues):
+    """Cross-check sources against pipeline logs and collect log summaries."""
+    log_summaries, diff_rows = {}, []
+    for name, logs in logs_by_source.items():
+        if logs is not None:
+            log_summaries[name] = check_logs(
+                name, logs, rows, csv_stats.get(name), issues, diff_rows)
+        elif not args.no_logs:
+            issues.add(name, "INFO", "NO_LOGS",
+                       f"{log_dirs.get(name, sources[name] / 'logs')} not found: "
+                       "log cross-checks skipped")
+    return log_summaries, diff_rows
+
+
+def write_csv_file(output_dir, name, data):
+    """Write a list of dictionaries to CSV using the union of their keys."""
+    keys = list(dict.fromkeys(key for item in data for key in item))
+    with open(output_dir / name, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(data)
+
+
+def prepare_issue_details(sources, rows, issues):
+    """Sort issues and add report paths and per-clip severity counts."""
+    severity_rank = SEVERITY_RANK
+    issues.sort(key=lambda issue:
+                (severity_rank[issue["severity"]], issue["clip"], issue["code"]))
+
+    for issue in issues:
+        issue["what_to_check"] = hint(issue["code"])
+        head, _, tail = issue["clip"].partition("/")
+        issue["path"] = str(sources[head] / tail) if head in sources else ""
+
+    by_clip = defaultdict(Counter)
+    for issue in issues:
+        by_clip[issue["clip"]][issue["severity"]] += 1
+
+    for row in rows:
+        row["n_errors"] = by_clip[row["clip"]]["ERROR"]
+        row["n_warnings"] = by_clip[row["clip"]]["WARN"]
+        row.pop("params_key", None)
+
+
+def write_markdown_summary(args, 
+                           sources, 
+                           rows, 
+                           ok_rows, 
+                           issues, 
+                           csv_stats,
+                           log_summaries, 
+                           null_rows, 
+                           centers):
+    """Build and write summary.md from the completed validation results."""
+    severity_counts = Counter(issue["severity"] for issue in issues)
+
+    def frac(value):
+        return "-" if value is None else f"{value:.3f}"
+
+    def is_dataset_level(clip):
+        return clip == "DATASET" or clip in sources
+
+    lines = ["# Validation overview\n",
+             f"**{severity_counts['ERROR']} error(s), {severity_counts['WARN']} warning(s), {severity_counts['INFO']} info.** "
+             f"Clips found: {len(rows)} ({dict(Counter(row['source'] for row in rows))}), fully parsed: {len(ok_rows)}. "
+             f"Sources: {', '.join(f'`{name}` = {path}' for name, path in sources.items())}\n",
+             "ERROR = broken or inconsistent, fix or ask for a re-send. WARN = look at it. INFO = context. "
+             "Every issue below says what to check; the same list with folder paths is in `issues.csv`.\n"]
+
+    dataset_level = [issue for issue in issues
+                     if is_dataset_level(issue["clip"]) and issue["severity"] != "INFO"]
+    lines += ["## 1. Dataset-level findings (look at these first)\n"]
+    for issue in dataset_level:
+        lines += [
+            f"- **{issue['severity']} {issue['code']}** ({issue['clip']}): {issue['message']}",
+            f"  - *What to check:* {issue['what_to_check']}",
+        ]
+    if not dataset_level:
+        lines += ["- none"]
+
+    per_clip = defaultdict(list)
+    for issue in issues:
+        if not is_dataset_level(issue["clip"]) and issue["severity"] != "INFO":
+            per_clip[issue["clip"]].append(issue)
+    ranked = sorted(per_clip.items(), key=lambda item:
+                    (-sum(issue["severity"] == "ERROR" for issue in item[1]),
+                     -len(item[1]), item[0]))
+
+    def escape_table(value):
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines += [f"\n## 2. Clips to look at (errors first; {len(ranked)} clip(s) flagged, top 20 shown)\n",
+              "Clip = `<source>/<folder>`; the full folder path is in the `path` column of `issues.csv`.\n",
+              "| clip | severity | code | message | what to check |", "|---|---|---|---|---|"]
+    for clip, items in ranked[:20]:
+        for index, issue in enumerate(items[:6]):
+            lines.append(
+                f"| {'`' + clip + '`' if index == 0 else ''} | {issue['severity']} | "
+                f"{issue['code']} | {escape_table(issue['message'])} | "
+                f"{escape_table(issue['what_to_check'])} |")
+        if len(items) > 6:
+            lines.append(f"| | | ... | {len(items) - 6} more for this clip in `issues.csv` | |")
+    if not ranked:
+        lines.append("| none | | | | |")
+    if len(ranked) > 20:
+        lines += ["", f"{len(ranked) - 20} more flagged clips: filter `issues.csv` or sort `clip_report.csv` by `n_errors`."]
+
+    codes = Counter((issue["severity"], issue["code"]) for issue in issues)
+    lines += ["\n## 3. Issues by type\n",
+              "| severity | code | count | what to check |", "|---|---|---|---|"]
+    lines += [f"| {severity} | {code} | {count} | {hint(code)} |"
+              for (severity, code), count in sorted(
+                  codes.items(), key=lambda item: (SEVERITY_RANK[item[0][0]], -item[1]))]
+
+    cross = Counter((row["source"], row.get("label")) for row in ok_rows)
+    lines += ["\n## 4. Source folder vs tracker label (clips)\n",
+              "| source | enter | pass | exit |", "|---|---|---|---|"]
+    lines += [f"| {name} | {cross[(name, 'enter')]} | {cross[(name, 'pass')]} | {cross[(name, 'exit')]} |"
+              for name in sources]
+
+    if csv_stats:
+        lines += ["\n## 5. clips.csv (tracker) vs folders\n",
+                  "| source | keep | removed | folders found | manual_label set | enter | pass | exit | removal reasons |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+        for name, stats in csv_stats.items():
+            by_label = stats["by_label"]
+            lines.append(
+                f"| {name} | {stats['keep']} | {stats['removed']} | "
+                f"{sum(row['source'] == name for row in rows)} | {stats['manual']} | "
+                f"{by_label[('enter', 'keep')]} | {by_label[('pass', 'keep')]} | "
+                f"{by_label[('exit', 'keep')]} | {dict(stats['reasons'])} |")
+
+    shown = {name: value for name, value in log_summaries.items() if value}
+    if shown:
+        lines += ["\n## 6. Pipeline logs (the run behind the data)\n"]
+        for name, summary in shown.items():
+            run = summary["run"]
+            stages = ", ".join(
+                f"{stage['stage']} {stage['done']}/{stage['total']} ({stage['seconds']:.0f} s)"
+                for stage in run["stages"])
+            lines += [
+                f"**{name}**: `{run['file']}` {run['status']}, {run['n_ok']} ok / {run['n_failed']} failed, "
+                f"{len(run['problems'])} warning/error line(s). Stages: {stages}.",
+                f"- log labels {dict((label, summary['counts'][label]) for label in ('enter', 'pass', 'exit'))}, "
+                f"removed {summary['counts']['removed']}; folders "
+                f"{dict((label, summary['labels'][label]) for label in ('enter', 'pass', 'exit'))}",
+                f"- other logs: {summary['others'] or 'none'}\n",
+            ]
+
+    lines += [
+        f"\n## 7. Feature null rates (features with a pooled null fraction above {args.show_null_above}; all features in `feature_nulls.csv`)\n",
+        "| feature | pooled null | enter | pass | exit | clips over threshold | status |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    null_table_rows = [
+        f"| {row['feature']} | {frac(row['pooled_null_rate'])} | {frac(row['null_rate_enter'])} | "
+        f"{frac(row['null_rate_pass'])} | {frac(row['null_rate_exit'])} | "
+        f"{row['clips_over_threshold']}/{row['clips']} | {row['status']}"
+        f"{' (documented)' if row['documented_nullable'] else ''} |"
+        for row in sorted(null_rows, key=lambda item: -item["pooled_null_rate"])
+        if row["pooled_null_rate"] > args.show_null_above
+    ][:40]
+    lines += null_table_rows or ["| none | | | | | | |"]
+
+    lines += ["",
+              "How to read it:",
+              "- **pooled null**: fraction (0-1) of all frames with a detected person, over all clips, where the feature is null.",
+              "- **enter / pass / exit**: the same share counted only over clips whose tracker label (`info.label`) is that class, "
+              "not the source folder. `-` means no clip of that label had data for the feature.",
+              f"- **clips over threshold**: in how many clips the feature is null in more than {args.null_threshold} of that clip's frames (the per-clip warning level, `--null-threshold`).",
+              "- **status**: `ALWAYS_NULL` never filled; `MOSTLY_NULL` null in most clips (a property of the feature); "
+              "`SOMETIMES_HIGH` normally filled but empty in some clips (those clips get an `UNUSUAL_NULLS` issue). "
+              "`documented` means FEATURES.md or the sample files show that nulls are by design.",
+              "- Large differences between enter and pass can be real behaviour (e.g. time-to-target only exists when approaching), "
+              "not an error."]
+
+    lines += ["\n## 8. Scene fingerprint groups (proxy for distinct locations / camera setups)\n",
+              "| group | clips | enter | pass | fps values | sessions |", "|---|---|---|---|---|---|"]
+    for group in range(len(centers)):
+        members = [row for row in rows if row.get("scene_cluster") == group]
+        labels = Counter(row.get("label") for row in members)
+        lines.append(
+            f"| {group} | {len(members)} | {labels['enter']} | {labels['pass']} | "
+            f"{sorted({row.get('fps') for row in members if row.get('fps')})} | "
+            f"{len({row.get('session') for row in members})} |")
+    lines.append("\nGroups use floor and door area shares and floor height only (wall share is too noisy). "
+                 "Lighting changes do not split a group; two different rooms with similar layout could merge. "
+                 "Check a few clips per group by eye.")
+
+    summary_path = args.out / "summary.md"
+    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return severity_counts, summary_path
+
+
+def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sources", nargs="+", metavar="SOURCE",
                     help="folder with one sub-folder per clip, optionally NAME=PATH to choose the tag shown in reports "
@@ -861,315 +1332,52 @@ def main():
     ap.add_argument("--area-tol", type=float, default=AREA_TOL)
     ap.add_argument("--area-sum-max", type=float, default=AREA_SUM_MAX)
     ap.add_argument("--cluster-tol", type=float, default=CLUSTER_TOL, help="scene fingerprint distance (floor/door share, floor top) for the same-location grouping")
-    args = ap.parse_args()
+    return ap.parse_args()
 
-    sources = {}
-    for spec in args.sources:
-        name, _, path = spec.partition("=") if "=" in spec else (None, "", spec)
-        path = Path(path)
-        name = name or path.resolve().name
-        if not path.is_dir():
-            sys.exit(f"Not a folder: {path}")
-        if name in sources:
-            sys.exit(f"Two sources are called '{name}'; rename one with NAME=PATH.")
-        sources[name] = path
-    expect = {}
-    for spec in args.expect:
-        key, _, num = spec.partition("=")
-        if key not in sources or not num.isdigit():
-            sys.exit(f"--expect needs NAME=N with NAME in {sorted(sources)}, got '{spec}'")
-        expect[key] = int(num)
+
+def main():
+    args = parse_args()
+
+    sources = resolve_sources(args)
+    expect = resolve_expectations(args, sources)
     args.out.mkdir(parents=True, exist_ok=True)
     allow = [re.compile(p) for p in DOCUMENTED_NULLABLE + args.ignore_null]
 
-    issues, rows, null_by_clip, vecs = Issues(), [], {}, {}
-    track_dirs = {}
-    for spec in args.tracks:
-        key, _, p = spec.partition("=")
-        if key not in sources or not p:
-            sys.exit(f"--tracks needs NAME=PATH with NAME in {sorted(sources)}, got '{spec}'")
-        track_dirs[key] = Path(p)
-    tracks_by_source = {}
-    for name, path in sources.items():
-        tdir = track_dirs.get(name, path / "tracks")
-        if args.no_tracks or not tdir.is_dir():
-            tracks_by_source[name] = None
-            if not args.no_tracks:
-                issues.add(name, "INFO", "NO_TRACKS", f"{tdir} not found: cross-checks against clips.csv/trajectories skipped")
-            continue
-        tracks_by_source[name] = load_tracks(tdir, name, issues)
-        if not tracks_by_source[name]:
-            issues.add(name, "ERROR", "TRACKS_EMPTY", f"no clips.csv rows found under {tdir}")
-    log_dirs = {}
-    for spec in args.logs:
-        key, _, p = spec.partition("=")
-        if key not in sources or not p:
-            sys.exit(f"--logs needs NAME=PATH with NAME in {sorted(sources)}, got '{spec}'")
-        log_dirs[key] = Path(p)
-    logs_by_source = {}
-    for name, path in sources.items():
-        ldir = log_dirs.get(name, path / "logs")
-        logs_by_source[name] = None
-        if not args.no_logs and ldir.is_dir():
-            logs_by_source[name] = [parse_log(p) for p in sorted(ldir.glob("*.log"))]
-    for name, path in sources.items():
-        clip_dirs = [p for p in sorted(path.iterdir()) if p.is_dir() and p.name not in SKIP_DIRS and not p.name.startswith("[TEMP]")]
-        if not clip_dirs:
-            issues.add(name, "ERROR", "SOURCE_EMPTY", f"no clip folders in {path}")
-        present = Counter()
-        for d in clip_dirs:
-            names = [p.name for p in d.iterdir() if p.is_file()]
-            for role, suffix in FILES.items():
-                present[role] += any(n.endswith(suffix) for n in names)
-        optional = frozenset(r for r in FILES if r != "features" and clip_dirs and present[r] == 0)
-        if optional:
-            issues.add(name, "INFO", "FILES_NOT_DELIVERED",
-                       f"{sorted(optional)} are in none of the {len(clip_dirs)} clip folders (run without --debug?); checks that need them are skipped")
-        for clip_dir in clip_dirs:
-            row, nstats, vec, _sha = validate_clip(clip_dir, name, args, issues, tracks_by_source[name], optional)
-            rows.append(row)
-            if nstats is not None:
-                null_by_clip[row["clip"]] = nstats
-                vecs[row["clip"]] = vec
-    if not rows:
-        sys.exit("No clip folders found (expected ROOT/enter/<clip>/ and ROOT/pass/<clip>/).")
+    issues = Issues()
+    tracks_by_source = load_tracks_by_source(args, sources, issues)
+    logs_by_source, log_dirs = load_logs(args, sources)
+    rows, null_by_clip, vecs = validate_sources(args, sources, tracks_by_source, issues)
 
-    # --- clips.csv rows marked keep that have no folder (and default expected counts)
-    csv_stats = {}
-    for name, idx in tracks_by_source.items():
-        if not idx:
-            continue
-        run = chosen_run(logs_by_source.get(name))
-        run_sessions = set(run["sessions"]) if run else set()
-        # tracks/ can still hold rows of an earlier or failed run (e.g. the pass run that crashed after 43 videos)
-        mine = {k: r for k, r in idx.items() if not run_sessions or str(r.get("session_id")).rsplit("_", 1)[-1] in run_sessions}
-        if len(mine) != len(idx):
-            issues.add(name, "INFO", "CSV_STALE_ROWS", f"{len(idx) - len(mine)} clips.csv row(s) belong to sessions that are not in {run['file']}; ignored")
-        keep = {k for k, r in mine.items() if r.get("cleaning_result") == "keep"}
-        present = {r.get("clip_key") for r in rows if r["source"] == name}
-        for k in sorted(keep - present):
-            issues.add(f"{name}/{k}", "ERROR", "CLIP_FOLDER_MISSING", "clips.csv marks it keep but no clip folder was found")
-        csv_stats[name] = {"keep": len(keep), "removed": len(mine) - len(keep), "stale": len(idx) - len(mine),
-                           "by_label": Counter((r.get("label"), r.get("cleaning_result")) for r in mine.values()),
-                           "reasons": Counter(r.get("cleaning_reason") for r in mine.values() if r.get("cleaning_result") != "keep"),
-                           "manual": sum(bool((r.get("manual_label") or "").strip()) for r in mine.values())}
-        expect.setdefault(name, len(keep))
+    csv_stats = check_tracker_folders(tracks_by_source, logs_by_source, rows, issues, expect)
 
-    # --- pipeline logs
-    log_summaries, diff_rows = {}, []
-    for name, logs in logs_by_source.items():
-        if logs is not None:
-            log_summaries[name] = check_logs(name, logs, rows, csv_stats.get(name), issues, diff_rows)
-        elif not args.no_logs:
-            issues.add(name, "INFO", "NO_LOGS", f"{log_dirs.get(name, sources[name] / 'logs')} not found: log cross-checks skipped")
+    log_summaries, diff_rows = check_pipeline_logs(
+        args, sources, log_dirs, logs_by_source, rows, csv_stats, issues)
 
-    # --- completeness against the supervisors' log
-    for name, expected in expect.items():
-        have = sum(r["source"] == name for r in rows)
-        if have != expected:
-            issues.add("DATASET", "ERROR", "CLIP_COUNT", f"{name}: found {have} clip folders, expected {expected} (--expect or clips.csv keep rows)")
+    check_completeness(expect, rows, issues)
 
-    # --- run-to-run consistency (params, schema, commit, fps, session)
-    ok_rows = [r for r in rows if r["clip"] in null_by_clip]
-    for field, sev in (("params_key", "ERROR"), ("git_commit", "WARN"), ("schema", "ERROR")):
-        counts = Counter(r.get(field) for r in ok_rows)
-        if len(counts) > 1:
-            main_val = counts.most_common(1)[0][0]
-            for r in ok_rows:
-                if r.get(field) != main_val:
-                    issues.add(r["clip"], sev, f"VARIANT_{field.upper()}", f"differs from the most common value ({counts.most_common(1)[0][1]} clips)")
-    for field in ("fps", "session", "width", "height"):
-        counts = Counter(r.get(field) for r in ok_rows)
-        if len(counts) > 1:
-            issues.add("DATASET", "INFO", f"MIXED_{field.upper()}", f"{dict(counts)}")
+    ok_rows = check_dataset_consistency(rows, null_by_clip, issues)
 
-    # --- feature nulls (per clip against the dataset's typical behaviour)
-    per_path = defaultdict(list)  # path -> [(clip, null_frac, label)]
-    label_of = {r["clip"]: r.get("label") for r in rows}
-    for clip, stats in null_by_clip.items():
-        for path, (n, t) in stats.items():
-            if t >= args.min_frames_for_nulls:
-                per_path[path].append((clip, n / t, label_of[clip]))
-    null_rows, flagged_per_clip = [], defaultdict(list)
-    for path, items in sorted(per_path.items()):
-        fracs = [f for _, f, _ in items]
-        typical = statistics.median(fracs)
-        high = [(c, f) for c, f, _ in items if f > args.null_threshold]
-        documented = any(p.search(path) for p in allow)
-        structural = typical > args.null_threshold  # null in most clips: a property of the feature, not of one clip
-        tot_n = sum(null_by_clip[c][path][0] for c, _, _ in items)
-        tot_t = sum(null_by_clip[c][path][1] for c, _, _ in items)
-        by_label = {}
-        for lab in ("enter", "pass", "exit"):
-            n = sum(null_by_clip[c][path][0] for c, _, l in items if l == lab)
-            t = sum(null_by_clip[c][path][1] for c, _, l in items if l == lab)
-            by_label[lab] = round(n / t, 3) if t else None
-        status = ("ALWAYS_NULL" if tot_n == tot_t else "MOSTLY_NULL" if structural else
-                  "SOMETIMES_HIGH" if high else "ok")
-        null_rows.append({"feature": path, "pooled_null_rate": round(tot_n / tot_t, 3), "median_clip_null_rate": round(typical, 3),
-                          "null_rate_enter": by_label["enter"], "null_rate_pass": by_label["pass"], "null_rate_exit": by_label["exit"],
-                          "clips": len(items), "clips_over_threshold": len(high),
-                          "documented_nullable": documented, "status": status})
-        if status == "ALWAYS_NULL" and not documented:
-            issues.add("DATASET", "WARN", "FEATURE_ALWAYS_NULL", f"{path} is null in every detected frame of every clip")
-        elif status == "MOSTLY_NULL" and not documented:
-            issues.add("DATASET", "WARN", "FEATURE_MOSTLY_NULL", f"{path}: median clip null rate {typical:.0%} (dataset-wide, not one clip)")
-        if not documented and not structural:
-            for c, f in high:
-                flagged_per_clip[c].append((path, f))  # normally filled, but empty in this clip
-    for clip, items in flagged_per_clip.items():
-        items.sort(key=lambda x: -x[1])
-        txt = "; ".join(f"{p} {f:.0%}" for p, f in items[:8]) + (f" (+{len(items) - 8} more)" if len(items) > 8 else "")
-        issues.add(clip, "WARN", "UNUSUAL_NULLS", f"{len(items)} feature(s) null in >{args.null_threshold:.0%} of frames: {txt}")
-    for r in rows:
-        items = flagged_per_clip.get(r["clip"], [])
-        r["n_unusual_null_features"] = len(items)
-        r["unusual_null_features"] = "; ".join(p for p, _ in sorted(items, key=lambda x: -x[1])[:8])
+    null_rows = check_feature_nulls(args, rows, null_by_clip, issues, allow)
 
-    # --- scene fingerprint: same corridor / camera setup?
-    centers, assign = [], {}
-    for clip in sorted(vecs):
-        v = vecs[clip]
-        for i, c in enumerate(centers):
-            if max(abs(a - b) for a, b in zip(v, c)) <= args.cluster_tol:
-                assign[clip] = i
-                break
-        else:
-            centers.append(v)
-            assign[clip] = len(centers) - 1
-    for r in rows:
-        r["scene_cluster"] = assign.get(r["clip"])
+    centers = assign_scene_clusters(args, rows, vecs)
 
-    # --- outliers among all clips (robust z), context only
-    if len(ok_rows) >= 20:
-        for stat in OUTLIER_STATS:
-            vals = [(r["clip"], r[stat]) for r in ok_rows if isinstance(r.get(stat), (int, float))]
-            if len(vals) < 20:
-                continue
-            med, mad = robust_z([v for _, v in vals])
-            if mad == 0:
-                continue
-            for clip, v in vals:
-                z = 0.6745 * (v - med) / mad
-                if abs(z) > 5:
-                    issues.add(clip, "INFO", "OUTLIER", f"{stat}={v} (dataset median {med:.3g}, robust z={z:.1f})")
+    check_outliers(ok_rows, issues)
 
     # --- write
-    sev_rank = {"ERROR": 0, "WARN": 1, "INFO": 2}
-    issues.sort(key=lambda i: (sev_rank[i["severity"]], i["clip"], i["code"]))
-    for i in issues:
-        i["what_to_check"] = hint(i["code"])
-        head, _, tail = i["clip"].partition("/")
-        i["path"] = str(sources[head] / tail) if head in sources else ""
-    by_clip = defaultdict(Counter)
-    for i in issues:
-        by_clip[i["clip"]][i["severity"]] += 1
-    for r in rows:
-        r["n_errors"], r["n_warnings"] = by_clip[r["clip"]]["ERROR"], by_clip[r["clip"]]["WARN"]
-        r.pop("params_key", None)
+    prepare_issue_details(sources, rows, issues)
 
-    def write_csv(name, data):
-        keys = list(dict.fromkeys(k for d in data for k in d))
-        with open(args.out / name, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=keys)
-            w.writeheader()
-            w.writerows(data)
-
-    write_csv("clip_report.csv", rows)
-    write_csv("issues.csv", issues)
+    write_csv_file(args.out, "clip_report.csv", rows)
+    write_csv_file(args.out, "issues.csv", issues)
     if diff_rows:
-        write_csv("log_vs_folders.csv", diff_rows)
-    write_csv("feature_nulls.csv", sorted(null_rows, key=lambda r: -r["pooled_null_rate"]))
+        write_csv_file(args.out, "log_vs_folders.csv", diff_rows)
+    write_csv_file(
+        args.out, 
+        "feature_nulls.csv",
+        sorted(null_rows, key=lambda row: -row["pooled_null_rate"]))
 
-    sev_count = Counter(i["severity"] for i in issues)
-    frac = lambda v: "-" if v is None else f"{v:.3f}"
-    is_dataset_level = lambda c: c == "DATASET" or c in sources
-    lines = ["# Validation overview\n",
-             f"**{sev_count['ERROR']} error(s), {sev_count['WARN']} warning(s), {sev_count['INFO']} info.** "
-             f"Clips found: {len(rows)} ({dict(Counter(r['source'] for r in rows))}), fully parsed: {len(ok_rows)}. "
-             f"Sources: {', '.join(f'`{n}` = {p}' for n, p in sources.items())}\n",
-             "ERROR = broken or inconsistent, fix or ask for a re-send. WARN = look at it. INFO = context. "
-             "Every issue below says what to check; the same list with folder paths is in `issues.csv`.\n"]
-
-    dataset_level = [i for i in issues if is_dataset_level(i["clip"]) and i["severity"] != "INFO"]
-    lines += ["## 1. Dataset-level findings (look at these first)\n"]
-    for i in dataset_level:
-        lines += [f"- **{i['severity']} {i['code']}** ({i['clip']}): {i['message']}", f"  - *What to check:* {i['what_to_check']}"]
-    if not dataset_level:
-        lines += ["- none"]
-
-    per_clip = defaultdict(list)
-    for i in issues:
-        if not is_dataset_level(i["clip"]) and i["severity"] != "INFO":
-            per_clip[i["clip"]].append(i)
-    ranked = sorted(per_clip.items(), key=lambda kv: (-sum(x["severity"] == "ERROR" for x in kv[1]), -len(kv[1]), kv[0]))
-    esc = lambda t: str(t).replace("|", "\\|").replace("\n", " ")
-    lines += [f"\n## 2. Clips to look at (errors first; {len(ranked)} clip(s) flagged, top 20 shown)\n",
-              "Clip = `<source>/<folder>`; the full folder path is in the `path` column of `issues.csv`.\n",
-              "| clip | severity | code | message | what to check |", "|---|---|---|---|---|"]
-    for clip, items in ranked[:20]:
-        for n, i in enumerate(items[:6]):
-            lines.append(f"| {'`' + clip + '`' if n == 0 else ''} | {i['severity']} | {i['code']} | {esc(i['message'])} | {esc(i['what_to_check'])} |")
-        if len(items) > 6:
-            lines.append(f"| | | ... | {len(items) - 6} more for this clip in `issues.csv` | |")
-    if not ranked:
-        lines.append("| none | | | | |")
-    if len(ranked) > 20:
-        lines += ["", f"{len(ranked) - 20} more flagged clips: filter `issues.csv` or sort `clip_report.csv` by `n_errors`."]
-
-    codes = Counter((i["severity"], i["code"]) for i in issues)
-    lines += ["\n## 3. Issues by type\n", "| severity | code | count | what to check |", "|---|---|---|---|"]
-    lines += [f"| {sv} | {c} | {n} | {hint(c)} |" for (sv, c), n in sorted(codes.items(), key=lambda x: (sev_rank[x[0][0]], -x[1]))]
-
-    cross = Counter((r["source"], r.get("label")) for r in ok_rows)
-    lines += ["\n## 4. Source folder vs tracker label (clips)\n", "| source | enter | pass | exit |", "|---|---|---|---|"]
-    lines += [f"| {f} | {cross[(f, 'enter')]} | {cross[(f, 'pass')]} | {cross[(f, 'exit')]} |" for f in sources]
-    if csv_stats:
-        lines += ["\n## 5. clips.csv (tracker) vs folders\n", "| source | keep | removed | folders found | manual_label set | enter | pass | exit | removal reasons |",
-                  "|---|---|---|---|---|---|---|---|---|"]
-        for name, st in csv_stats.items():
-            bl = st["by_label"]
-            lines.append(f"| {name} | {st['keep']} | {st['removed']} | {sum(r['source'] == name for r in rows)} | {st['manual']} | "
-                         f"{bl[('enter', 'keep')]} | {bl[('pass', 'keep')]} | {bl[('exit', 'keep')]} | {dict(st['reasons'])} |")
-    shown = {n: v for n, v in log_summaries.items() if v}
-    if shown:
-        lines += ["\n## 6. Pipeline logs (the run behind the data)\n"]
-        for name, v in shown.items():
-            run = v["run"]
-            stages = ", ".join(f"{st['stage']} {st['done']}/{st['total']} ({st['seconds']:.0f} s)" for st in run["stages"])
-            lines += [f"**{name}**: `{run['file']}` {run['status']}, {run['n_ok']} ok / {run['n_failed']} failed, "
-                      f"{len(run['problems'])} warning/error line(s). Stages: {stages}.",
-                      f"- log labels {dict((k, v['counts'][k]) for k in ('enter', 'pass', 'exit'))}, removed {v['counts']['removed']}; "
-                      f"folders {dict((k, v['labels'][k]) for k in ('enter', 'pass', 'exit'))}",
-                      f"- other logs: {v['others'] or 'none'}\n"]
-
-    lines += [f"\n## 7. Feature null rates (features with a pooled null fraction above {args.show_null_above}; all features in `feature_nulls.csv`)\n",
-              "| feature | pooled null | enter | pass | exit | clips over threshold | status |", "|---|---|---|---|---|---|---|"]
-    lines += [f"| {r['feature']} | {frac(r['pooled_null_rate'])} | {frac(r['null_rate_enter'])} | {frac(r['null_rate_pass'])} | {frac(r['null_rate_exit'])} | "
-              f"{r['clips_over_threshold']}/{r['clips']} | {r['status']}{' (documented)' if r['documented_nullable'] else ''} |"
-              for r in sorted(null_rows, key=lambda r: -r["pooled_null_rate"]) if r["pooled_null_rate"] > args.show_null_above][:40] or ["| none | | | | | | |"]
-    lines += ["",
-              "How to read it:",
-              "- **pooled null**: fraction (0-1) of all frames with a detected person, over all clips, where the feature is null.",
-              "- **enter / pass / exit**: the same share counted only over clips whose tracker label (`info.label`) is that class, "
-              "not the source folder. `-` means no clip of that label had data for the feature.",
-              f"- **clips over threshold**: in how many clips the feature is null in more than {args.null_threshold} of that clip's frames (the per-clip warning level, `--null-threshold`).",
-              "- **status**: `ALWAYS_NULL` never filled; `MOSTLY_NULL` null in most clips (a property of the feature); "
-              "`SOMETIMES_HIGH` normally filled but empty in some clips (those clips get an `UNUSUAL_NULLS` issue). "
-              "`documented` means FEATURES.md or the sample files show that nulls are by design.",
-              "- Large differences between enter and pass can be real behaviour (e.g. time-to-target only exists when approaching), "
-              "not an error."]
-
-    lines += ["\n## 8. Scene fingerprint groups (proxy for distinct locations / camera setups)\n",
-              "| group | clips | enter | pass | fps values | sessions |", "|---|---|---|---|---|---|"]
-    for g in range(len(centers)):
-        members = [r for r in rows if r.get("scene_cluster") == g]
-        lab = Counter(r.get("label") for r in members)
-        lines.append(f"| {g} | {len(members)} | {lab['enter']} | {lab['pass']} | "
-                     f"{sorted({r.get('fps') for r in members if r.get('fps')})} | {len({r.get('session') for r in members})} |")
-    lines.append("\nGroups use floor and door area shares and floor height only (wall share is too noisy). Lighting changes do not split a group; "
-                 "two different rooms with similar layout could merge. Check a few clips per group by eye.")
-    (args.out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    sev_count, summary_path = write_markdown_summary(
+        args, sources, rows, ok_rows, issues, csv_stats,
+        log_summaries, null_rows, centers)
 
     print(f"Validation finished: {len(rows)} clips, {sev_count['ERROR']} error(s), {sev_count['WARN']} warning(s), {sev_count['INFO']} info.")
     print(f"Overview with what to check: {args.out / 'summary.md'}")
