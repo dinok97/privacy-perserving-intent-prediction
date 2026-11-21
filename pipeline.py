@@ -4,9 +4,17 @@ From the repository root:
   python pipeline.py --source-dir INPUT --with-3d --lingbot-runs RUNS
   python pipeline.py --processed-manifest CLIPS.json --with-3d --lingbot-runs RUNS
 
-Processed manifests accept Dino's clip-path list or {video, trajectory, scene,
-pose, background} records. Paths are relative to the manifest. This mode reuses
-YOLO detections; no tracking model is loaded. Optional scene paths reuse SAM3.
+Processed manifests accept Dino's clip-path list or {video, trajectory, pose}
+records. Paths are relative to the manifest. This mode reuses YOLO detections;
+no tracking model is loaded.
+
+One background per run: before anything long, the first video (file name order)
+gives a candidate background in OUTPUT/placement/candidate.png, with the lens
+estimated from it. A person approves it in the terminal (n = try the next video).
+SAM 3 then segments it once and the same lens is applied to every video. An
+earlier OUTPUT/placement is offered for reuse and still needs a yes. A video of
+another size stops the run. See processing/placement.py. The run needs a
+terminal for this question.
 
 For missing depth, --lingbot-config accepts a local or ssh-docker runtime JSON
 (see geometry3d/lingbot_runtime.py). LingBot stays in its own checkout/environment. The
@@ -262,11 +270,32 @@ def mark_failed(record, stage_name, error):
     record['failed_stage'] = stage_name
 
 
+def count_people(records, videos_found=None, videos_tracked=None):
+    """How many videos went in and how many people (clips) came out of the tracker.
+
+    A video with several people gives one clip per person, so clips >= videos with people.
+    videos_found / videos_tracked are None when the tracking was done in an earlier run."""
+    per_video = {}
+    for record in records:
+        per_video[str(record['video'])] = per_video.get(str(record['video']), 0) + 1
+    return {'videos_found': videos_found, 'videos_tracked': videos_tracked,
+            'videos_with_people': len(per_video), 'people_tracked': len(records),
+            'videos_with_several_people': sum(n > 1 for n in per_video.values()),
+            'most_people_in_one_video': max(per_video.values(), default=0)}
+
+
 def log_summary(summary):
     failed = summary.get('failed_clips', [])
     level = {'complete': logging.INFO, 'failed': logging.ERROR}.get(summary['status'], logging.WARNING)
     logger.log(level, 'Pipeline %s - %d clip(s) ok, %d failed (%.1f s)', summary['status'],
                len(summary['clips']), len(failed), summary['duration_s'])
+    counts = summary.get('counts')
+    if counts:
+        logger.info('Videos: %s found, %s tracked, %d with people -> %d people (clips); %d video(s) with several people '
+                    '(most in one video: %d)', counts['videos_found'] if counts['videos_found'] is not None else '-',
+                    counts['videos_tracked'] if counts['videos_tracked'] is not None else '-',
+                    counts['videos_with_people'], counts['people_tracked'],
+                    counts['videos_with_several_people'], counts['most_people_in_one_video'])
     if summary.get('privacy_tiers'):
         logger.info('Privacy tiers written: %s', ', '.join(summary['privacy_tiers']))
     for item in failed:
@@ -292,14 +321,16 @@ def list_videos(folder):
 
 # ----------------------------------------------------------------------------- stages
 
-def run_fisheye_corrector(videos, progress, failures, fail_fast=False):
+def run_fisheye_corrector(videos, progress, failures, fail_fast=False, lens=None):
     """Undistorts each video into [TEMP]_undistorted_results (emptied first). Returns the videos to track.
+
+    lens is the one lens of the approved placement; every video is corrected with it.
 
     A failing video is added to failures and skipped (unless fail_fast)."""
     from processing import fisheye_correction
     for video in videos:
         logger.debug('  input: %s', video)
-    return call_with_progress(fisheye_correction.correct_videos, progress, videos, failures=failures, fail_fast=fail_fast)
+    return call_with_progress(fisheye_correction.correct_videos, progress, videos, failures=failures, fail_fast=fail_fast, lens=lens)
 
 
 def run_trajectory_tracker(videos, source_dir, output, manifest, device, progress, failures, fail_fast=False):
@@ -326,74 +357,21 @@ def clean_source_videos(source_dir):
                 len(result['duplicates']), len(result['too_short']), len(result['low_fps']))
 
 
-def run_background_extractor(records, progress, fail_fast=False):
-    """Median background per clip and a check of existing scene files.
+def run_placement(videos, directory, undistort):
+    """One approved background, lens and segmentation for the whole run (processing/placement.py).
 
-    Returns the background images that still need segmentation. Failing records get an 'error' key."""
-    from processing import background_extraction
-    pending = []
-    for record in records:
-        video, work = record['video'], record['workspace']
-        try:
-            scene = record.get('scene')
-            sibling_scene = video.with_name(video.stem + '_background.json')
-            if scene is None:
-                scene = sibling_scene if sibling_scene.is_file() else work / (video.stem + '_background.json')
-            record['scene'] = scene
-            background = record.get('background') or work / (video.stem + '_background.png')
-            record['background'] = background
-            if background.is_file():
-                logger.debug('%s: reusing background %s', video.name, background)
-            else:
-                import cv2
-                logger.debug('%s: extracting median background', video.name)
-                background.parent.mkdir(parents=True, exist_ok=True)
-                image, report = background_extraction.median_background(video)
-                if report['people_left']:
-                    logger.warning('%s: %d person(s) still visible in the background, %s', video.name,
-                                   report['people_left'], 'pixelated' if background_extraction.ON_PERSON_FOUND == 'pixelate' else 'kept')
-                if not cv2.imwrite(str(background), image):
-                    raise OSError(f'Could not save background {background}')
-            if not scene.is_file():
-                if scene != background.with_suffix('.json'):
-                    raise FileNotFoundError(f'Explicit segmentation is missing: {scene}')
-                pending.append(str(background))
-            else:
-                parsed = geometry.load(scene)
-                size = [record['video_info']['width'], record['video_info']['height']]
-                if parsed['image_size'] != size:
-                    raise ValueError(f'Scene image size {parsed["image_size"]} != video size {size}: {scene}')
-                if parsed.get('source_video_sha256') not in (None, record['video_info']['sha256']):
-                    raise ValueError(f'Scene segmentation was made from a different video: {scene}')
-                logger.debug('%s: reusing scene segmentation %s', video.name, scene)
-        except Exception as error:
-            if fail_fast:
-                raise
-            logger.exception('%s: background failed: %s', video.name, error)
-            mark_failed(record, 'background', error)
-            progress(ok=False)
-            continue
-        progress()
-    return pending
+    The person is asked in the terminal, so this runs outside any stage (a stage captures the output).
+    undistort: True/False, or None for videos that are already tracked (an existing placement is accepted as it is)."""
+    from processing import background_segmentation, placement
 
+    def segment(background):
+        with stage('Segmentation', 1) as progress:
+            call_with_progress(background_segmentation.segment_images, progress, [str(background)])
 
-def run_segmentation(records, pending, progress, fail_fast=False):
-    from processing import background_segmentation
-    call_with_progress(background_segmentation.segment_images, progress, pending)
-    for record in records:
-        if 'error' in record or str(record['background']) not in pending:
-            continue
-        try:
-            scene = geometry.load(record['scene'])
-            scene['source_video_sha256'] = record['video_info']['sha256']
-            geometry.save(record['scene'], scene)
-        except Exception as error:
-            if fail_fast:
-                raise
-            logger.exception('%s: segmentation output missing or unreadable: %s', record['video'].name, error)
-            mark_failed(record, 'segmentation', error)
-            progress.failed += 1
-            progress.render()
+    logger.info('Background - making a candidate from the first video')
+    result = placement.prepare(videos, directory, undistort, segment)
+    logger.info('Background - %s: %s', 'reused' if result['reused'] else 'approved', result['background'])
+    return result
 
 
 def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=None, assumed_width=.825, *, debug=True):
@@ -412,7 +390,7 @@ def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=
         logger.debug('%s: no pose file, pose features skipped', name)
     out = record['workspace'] / f'{record["video"].stem}_features.json'
     feature_extractor.run_clip(trajectory, record['scene'], record.get('pose'),
-                              record['background'], out, debug=debug)
+                              record['background'], out, debug=debug, video_p=record['video'])
     features = geometry.load(out)
     features['info']['clip_video'] = record['video'].name
     features['info']['clip_video_sha256'] = record['video_info']['sha256']
@@ -452,7 +430,7 @@ def run_privacy_tiers(clips):
 
 
 def delete_debug_files(records):
-    """Remove temporary background and feature-debug files for each clip."""
+    """Remove the feature-debug image of each clip (and background files left by older versions)."""
     for record in records:
         video_path = Path(record['video'])
         video_filename = video_path.stem
@@ -469,7 +447,7 @@ def delete_debug_files(records):
 
 
 def delete_undistorted_results(source_dir):
-    """Remove the temporary undistorted-video directory created during correction."""
+    """Remove the temporary undistorted-video directory created during correction (always, also with --debug)."""
     undistorted_results = Path(source_dir) / '[TEMP]_undistorted_results'
     if undistorted_results.exists():
         shutil.rmtree(undistorted_results)
@@ -501,24 +479,28 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
     reused_tracking = processed_manifest is not None
     summary = {'status': 'running', 'with_3d': with_3d, 'reused_tracking': reused_tracking,
                'processed_manifest': None, 'log_file': str(log_file) if log_file else None,
-               'privacy_tiers': [], 'clips': [], 'failed_clips': []}
+               'placement': None, 'counts': None, 'privacy_tiers': [], 'clips': [], 'failed_clips': []}
     logger.debug('Pipeline started | output=%s | with_3d=%s | reused_tracking=%s | device=%s | fail_fast=%s',
                  output, with_3d, reused_tracking, device, fail_fast)
     t_start = time.perf_counter()
     private_tracking = None
+    created_manifest = None  # the manifest this run wrote itself (not one given by the user)
     records = []
+    videos = tracked = None
     try:
         if processed_manifest is None:
             clean_source_videos(source_dir)
             videos = list_videos(source_dir)
             if not videos:
                 raise ValueError(f'No input videos found in {source_dir}')
+            # the background (and with it the lens) is approved first, so the long steps below run unattended
+            place = run_placement(videos, output / 'placement', undistort=not skip_undistort)
             if skip_undistort:
                 logger.info('Fisheye correction - skipped (--skip-undistort)')
                 tracked = videos  # tracked straight from the input folder; no temp folder
             else:
                 with stage('Fisheye correction', len(videos)) as progress:
-                    tracked = run_fisheye_corrector(videos, progress, summary['failed_clips'], fail_fast)
+                    tracked = run_fisheye_corrector(videos, progress, summary['failed_clips'], fail_fast, place['lens'])
                 if not tracked:
                     raise RuntimeError('Fisheye correction failed for every input video')
             tracking_root = output
@@ -526,6 +508,8 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                 private_tracking = TemporaryDirectory(prefix='pipeline-tracking-')
                 tracking_root = Path(private_tracking.name)
             processed_manifest = tracking_root / 'processed_video_paths.json'
+            if private_tracking is None:
+                created_manifest = processed_manifest
             with stage('Trajectory tracking', len(tracked)) as progress:
                 run_trajectory_tracker(tracked, source_dir, tracking_root / 'tracks', processed_manifest, device, progress,
                                        summary['failed_clips'], fail_fast)
@@ -550,13 +534,14 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                              info['width'], info['height'], record['workspace'])
                 progress()
 
-        with stage('Background extraction', len(records)) as progress:
-            pending = run_background_extractor(records, progress, fail_fast)
-        if pending:
-            with stage('Segmentation', len(pending)) as progress:
-                run_segmentation(records, pending, progress, fail_fast)
-        else:
-            logger.info('Segmentation - nothing to segment (existing scenes reused)')
+        summary['counts'] = count_people(records, len(videos) if videos else None, len(tracked) if tracked else None)
+
+        if reused_tracking:
+            # tracking was done in an earlier run: the placement is made from these videos as they are
+            place = run_placement(sorted(str(r['video']) for r in records), output / 'placement', undistort=None)
+        for record in records:
+            record['background'], record['scene'] = place['background'], place['scene']
+        summary['placement'] = {'directory': str(place['background'].parent), 'reused': place['reused']}
 
         ready = [r for r in records if 'error' not in r]
         with stage('Feature extraction', len(ready)) as progress:
@@ -599,7 +584,6 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
 
         if not debug:
             delete_debug_files(records=records)
-            delete_undistorted_results(source_dir)
         
         logger.info('Feature catalog - %d feature(s) written', len(catalog))
         summary['status'] = 'complete_with_errors' if summary['failed_clips'] else 'complete'
@@ -610,6 +594,11 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
     finally:
         if private_tracking is not None:
             private_tracking.cleanup()
+        if not reused_tracking:
+            delete_undistorted_results(source_dir)  # no video is kept, whatever the flags or the outcome
+        if created_manifest is not None and not debug:
+            Path(created_manifest).unlink(missing_ok=True)  # pipeline_run.json is the record of the run
+            summary['processed_manifest'] = None
         if with_3d and not debug and summary['status'] == 'failed':
             delete_debug_files([record for record in records if 'workspace' in record])
         summary['duration_s'] = round(time.perf_counter() - t_start, 1)
@@ -623,8 +612,9 @@ def main():
     global CAPTURE_OUTPUT
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--source-dir', type=Path, default=SOURCE_DIR)
-    parser.add_argument('--output', type=Path, default=PROJECT / 'data/pipeline',
-                        help='Output directory. Use a fresh directory for 3D after upgrading from an older version.')
+    parser.add_argument('--output', type=Path, default=None,
+                        help='Output directory (default: data/pipeline/<name of the input folder>, so every input folder '
+                             'gets its own background and run summary). Use a fresh directory for 3D after upgrading from an older version.')
     parser.add_argument('--processed-manifest', type=Path, help='Reuse saved clips/trajectory JSON; skip fisheye and YOLO stages')
     parser.add_argument('--with-3d', action='store_true', help='Append LingBot distances and closure rates to 2D features')
     parser.add_argument('--lingbot-runs', type=Path, default=PROJECT / 'data/lingbot')
@@ -637,12 +627,16 @@ def main():
     parser.add_argument('--show-output', action='store_true',
                         help='Also print the raw output of the submodules (YOLO, SAM3, undistort) to the console')
     parser.add_argument('--debug', action='store_true',
-                        help='Keep private debug files, including background images and temporary undistorted videos')
+                        help='Keep the per-clip feature debug images and the processed_video_paths.json manifest '
+                             '(no video is ever kept)')
     parser.add_argument('--no-privacy-tiers', action='store_true',
                         help='Do not write the <clip>_features_F1/F2/F3/F4.json files (privacy/strip_features.py can make them later)')
     args = parser.parse_args()
     
     CAPTURE_OUTPUT = not args.show_output
+    if args.output is None:  # one output folder per input folder
+        name = args.processed_manifest.resolve().parent.name if args.processed_manifest else args.source_dir.resolve().name
+        args.output = PROJECT / 'data/pipeline' / name
     log_file = setup_logging(args.output.resolve() / 'logs')
     if args.show_output:
         CONSOLE.live = False  # raw prints would land in the middle of the in-place line

@@ -111,7 +111,7 @@ So there are three automatic types:
 | `counts.*` | `n_exits`, `n_door`, `n_edge`, `n_floor_tip`, `n_manual`, `n_door_no_floor_contact` |
 | `areas.*` | share of the image that is floor / wall / window / door / unlabelled |
 | `floor_top_y_px` | highest floor row — proxy for camera tilt |
-| `brightness_mean`, `brightness_contrast` | lighting of the background (0–1) |
+| `brightness_mean`, `brightness_contrast` | lighting of the clip (0–1): grey mean and spread over 15 frames of the clip, the tracked person's box left out. Measured per clip, because the background is shared by all clips |
 | `n_polygons_used`, `n_polygons_dropped` | segmentation quality |
 
 ### 4.2 Position (`pos`)

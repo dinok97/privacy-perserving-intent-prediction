@@ -5,7 +5,7 @@ Inputs per clip (<stem> = <video>_<action>, action = enter/pass/exit):
     <stem>.json              trajectory + COCO-17 keypoints in pixels (Jesper's script)
     <stem>_pose.json         pose sidecar (optional; keypoint fallback only)
     <stem>_background.json   segmentation polygons from background_segmentation.py
-    <stem>_background.png    optional; used for brightness features and the debug overlay
+    <stem>_background.png    optional; used for the debug overlay (and brightness when no video is given)
     exits_<stem>.json        optional; hand-annotated exits replacing the automatic ones
 
 Output (next to the trajectory unless told otherwise):
@@ -585,11 +585,13 @@ class Scene:
                 return i
         return None
 
-    def summary(self, background_path=None):
+    def summary(self, background_path=None, brightness=None):
         tot = self.W * self.H
         frac = lambda m: float(m.sum()) / tot
         bright = contrast = None
-        if background_path and Path(background_path).is_file():
+        if brightness is not None:  # measured on this clip (the background is shared by all clips)
+            bright, contrast = brightness
+        elif background_path and Path(background_path).is_file():
             g = cv2.imread(str(background_path), cv2.IMREAD_GRAYSCALE)
             if g is not None:
                 bright, contrast = float(g.mean()) / 255, float(g.std()) / 255
@@ -744,7 +746,7 @@ NO_POSE = {key: None for key in pose_features(_no_kp, None, None)}
 
 
 # ---------------------------------------------------------------- main extraction
-def extract(traj, scene_json, pose=None, background=None, sources=None, manual_exits=None):
+def extract(traj, scene_json, pose=None, background=None, sources=None, manual_exits=None, brightness=None):
     W, H = int(traj["frame_width"]), int(traj["frame_height"])
     target = traj.get("door_center", [W / 2, H - 1])
     scene = Scene(scene_json, W, H, target, manual_exits)
@@ -1035,7 +1037,7 @@ def extract(traj, scene_json, pose=None, background=None, sources=None, manual_e
         "notes": "data.frames.* are causal (current + past frames only). "
                  "data.track_summary.hindsight uses the whole track - do not use for online prediction.",
     }
-    data = {"scene_summary": scene.summary(background), "track_summary": track_summary,
+    data = {"scene_summary": scene.summary(background, brightness), "track_summary": track_summary,
             "frames": frames_out}
     return {"info": info, "data": data}, scene
 
@@ -1092,7 +1094,7 @@ CATALOG = [
     C("scene_summary.counts.*", "scene", "scene", "count", [S], True, "Number of exits by type/status"),
     C("scene_summary.areas.*", "scene", "scene", "fraction", [S], True, "Floor/wall/window/door/unlabelled area shares"),
     C("scene_summary.floor_top_y_px", "scene", "scene", "px", [S], True, "Highest floor row (horizon proxy)"),
-    C("scene_summary.brightness_mean", "scene", "scene", "0-1", ["background"], True, "Background brightness (lighting)"),
+    C("scene_summary.brightness_mean", "scene", "scene", "0-1", ["video"], True, "Brightness of the clip (lighting), people excluded"),
     C("track_summary.causal.origin_exit", "track", "track", "object", [T, S], True, "Exit the person came from"),
     C("track_summary.causal.first_bh_px", "track", "track", "px", [T], True, "Body height at first detection"),
     C("track_summary.hindsight.*", "track", "track", "mixed", [T], False, "Whole-track stats: NOT for online prediction"),
@@ -1158,7 +1160,39 @@ def write_catalog(out_dir):
         json.dump({"schema_version": SCHEMA_VERSION, "features": CATALOG}, f, indent=1)
 
 
-def run_clip(traj_p, scene_p, pose_p=None, bg_p=None, out_p=None, debug=False, exits_p=None):
+def clip_brightness(video_path, frames, n=15):
+    """(mean, std) of the grey values of a clip, 0-1, over n evenly spread frames.
+
+    The tracked person's box is left out, so a person's clothes do not move the value. Every clip is
+    measured on its own: the background is shared by all clips and cannot show the lighting of a clip.
+    Returns None if the video cannot be read."""
+    cap = cv2.VideoCapture(str(video_path))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    boxes = {fr.get("frame_index"): fr.get("bbox") for fr in frames}
+    count, total_sum, total_sq = 0, 0.0, 0.0
+    for index in (np.linspace(0, total - 1, n).astype(int) if total > 0 else []):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+        ok, image = cap.read()
+        if not ok:
+            continue
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float64)
+        keep = np.ones(gray.shape, bool)
+        box = boxes.get(int(index))
+        if box is not None:
+            x1, y1, x2, y2 = (int(round(v)) for v in box)
+            keep[max(y1, 0):max(y2, 0), max(x1, 0):max(x2, 0)] = False
+        values = gray[keep]
+        count += values.size
+        total_sum += float(values.sum())
+        total_sq += float((values ** 2).sum())
+    cap.release()
+    if not count:
+        return None
+    mean = total_sum / count
+    return mean / 255, float(np.sqrt(max(total_sq / count - mean ** 2, 0.0))) / 255
+
+
+def run_clip(traj_p, scene_p, pose_p=None, bg_p=None, out_p=None, debug=False, exits_p=None, video_p=None):
     traj_p, scene_p = Path(traj_p), Path(scene_p)
     if not traj_p.is_file():
         raise FileNotFoundError(f"[Extract Features] trajectory not found: {traj_p}")
@@ -1172,7 +1206,9 @@ def run_clip(traj_p, scene_p, pose_p=None, bg_p=None, out_p=None, debug=False, e
                "depth": None}
     manual = load(exits_p)["exits"] if exits_p and Path(exits_p).is_file() else None
     sources["manual_exits"] = Path(exits_p).name if manual else None
-    result, scene = extract(load(traj_p), load(scene_p), pose, bg_p, sources, manual)
+    traj = load(traj_p)
+    brightness = clip_brightness(video_p, traj["frames"]) if video_p and Path(video_p).is_file() else None
+    result, scene = extract(traj, load(scene_p), pose, bg_p, sources, manual, brightness)
     out_p = Path(out_p) if out_p else traj_p.with_name(f"{traj_p.stem}_features.json")
     out_p.parent.mkdir(parents=True, exist_ok=True)
     with open(out_p, "w", encoding="utf-8") as f:
