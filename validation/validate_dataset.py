@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the supervisors' pipeline output (feat-0.4) without needing their log.
+"""Validate the supervisors' pipeline output without needing their log.
 
 Input: one or more SOURCE folders, each holding one clip folder per clip:
 
@@ -49,6 +49,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+
+SCHEMA_VERSION = "feat-0.4"
 FILES = {  # role -> required filename suffix
     "features": "_features.json",
     "scene": "_background.json",
@@ -58,8 +60,23 @@ FILES = {  # role -> required filename suffix
 }
 LABELS = {"enter", "pass", "exit"}
 SKIP_DIRS = {"logs", "tracks"}  # the pipeline writes these next to the clip folders
-EXPECTED_SCHEMA = {"feat-0.4"}
 FRAME_BLOCKS = ("pos", "kin", "pose", "scene_rel", "geometry_3d")
+
+
+# Thresholds for the validator's checks
+NULL_THRESHOLD = 0.5
+SHOW_NULL_ABOVE = 0.30
+MIN_FRAMES_FOR_NULLS = 5
+BORDERLINE_THRESHOLD = 0.15
+MIN_DETECTED_FRAMES = 10
+MAX_GAP_FRAMES = 5
+MAX_JUMP_BH = 0.5
+MAX_OFF_FLOOR = 0.5
+REACH_BH = 0.5
+AREA_TOL = 0.03
+AREA_SUM_MAX = 1.15
+CLUSTER_TOL = 0.04
+
 
 # Nulls that FEATURES.md says are by design, or that are structural in the sample files
 # (edge is only set for edge-type exits). Matched against the normalised feature path.
@@ -116,6 +133,7 @@ def number_rule(path):
 
 
 def shoelace(poly):
+    """Area of a polygon (list of (x, y) points) using the shoelace formula."""
     area = 0.0
     for i, (x1, y1) in enumerate(poly):
         x2, y2 = poly[(i + 1) % len(poly)]
@@ -124,6 +142,7 @@ def shoelace(poly):
 
 
 def robust_z(values):
+    """Median and median absolute deviation of a list of numbers."""
     med = statistics.median(values)
     mad = statistics.median(abs(v - med) for v in values)
     return med, mad
@@ -140,7 +159,7 @@ HINTS = {
     "IMAGE_SIZE_VS_JSON": "Image size differs from frame_size in the JSON, so polygons would not line up with the image.",
     "JSON_UNREADABLE": "The JSON is truncated or corrupt. Open the named file; re-copy it, else the clip must be re-run.",
     "SCHEMA_KEYS": "features.json lacks an expected top-level key. Compare with a good clip; different schema version?",
-    "SCHEMA_VERSION": "Not feat-0.4. The clip came from another pipeline version; do not mix it into the same dataset.",
+    "SCHEMA_VERSION": f"Not {SCHEMA_VERSION}. The clip came from another pipeline version; do not mix it into the same dataset.",
     "LABEL_INVALID": "info.label is not enter/pass/exit. Open features.json and check info.label.",
     "LABEL_DIFFERS_FROM_SOURCE": "Normal when a bystander walks through a recording of the other class; it is only context.",
     "CLIP_NAME_MISMATCH": "info.clip does not match the file name. Check that the right files sit in this folder.",
@@ -406,6 +425,7 @@ def check_logs(source, logs, rows, csv_stat, issues, diff_rows):
 # ----------------------------------------------------------------------------- tracks/ (tracker output)
 
 def sha256_file(path):
+    """Return the SHA256 hex digest of a file, reading it in 1 MB chunks."""
     digest = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -626,8 +646,8 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
                width=W, height=H)
 
     # --- provenance / identity
-    if info.get("schema_version") not in EXPECTED_SCHEMA:
-        issues.add(clip_id, "ERROR", "SCHEMA_VERSION", f"{info.get('schema_version')} not in {sorted(EXPECTED_SCHEMA)}")
+    if info.get("schema_version") != SCHEMA_VERSION:
+        issues.add(clip_id, "ERROR", "SCHEMA_VERSION", f"{info.get('schema_version')} != {SCHEMA_VERSION}")
     label = info.get("label")
     if label not in LABELS:
         issues.add(clip_id, "ERROR", "LABEL_INVALID", f"info.label={label}")
@@ -815,11 +835,11 @@ def main():
                     help="folder with one sub-folder per clip, optionally NAME=PATH to choose the tag shown in reports "
                          "(default tag: the folder name). Give one per input folder, e.g. masterdata_enter masterdata_pass.")
     ap.add_argument("--out", type=Path, default=Path("validation_report"))
-    ap.add_argument("--null-threshold", type=float, default=0.5,
+    ap.add_argument("--null-threshold", type=float, default=NULL_THRESHOLD,
                     help="warn when a feature is null in more than this share of a clip's detected frames")
-    ap.add_argument("--show-null-above", type=float, default=0.30,
+    ap.add_argument("--show-null-above", type=float, default=SHOW_NULL_ABOVE,
                     help="the null table in summary.md lists features whose pooled null fraction is above this")
-    ap.add_argument("--min-frames-for-nulls", type=int, default=5, help="skip null checks on clips with fewer detected frames")
+    ap.add_argument("--min-frames-for-nulls", type=int, default=MIN_FRAMES_FOR_NULLS, help="skip null checks on clips with fewer detected frames")
     ap.add_argument("--ignore-null", action="append", default=[], metavar="REGEX",
                     help="feature paths (e.g. 'kin.tau_s') whose nulls are expected; repeatable")
     ap.add_argument("--expect", action="append", default=[], metavar="NAME=N",
@@ -830,17 +850,17 @@ def main():
     ap.add_argument("--logs", action="append", default=[], metavar="NAME=PATH",
                     help="pipeline logs of a source (default: <source>/logs if it exists); repeatable")
     ap.add_argument("--no-logs", action="store_true", help="skip the cross-check against the pipeline logs")
-    ap.add_argument("--borderline", type=float, default=0.15,
+    ap.add_argument("--borderline", type=float, default=BORDERLINE_THRESHOLD,
                     help="flag enter/pass clips whose last point is within this distance of the ellipse boundary (value 1)")
-    ap.add_argument("--min-detected", type=int, default=10)
-    ap.add_argument("--max-gap-frames", type=int, default=5)
-    ap.add_argument("--max-jump-bh", type=float, default=0.5, help="max ground-point move per frame, in body heights")
-    ap.add_argument("--max-off-floor", type=float, default=0.5)
-    ap.add_argument("--reach-bh", type=float, default=0.5,
+    ap.add_argument("--min-detected", type=int, default=MIN_DETECTED_FRAMES)
+    ap.add_argument("--max-gap-frames", type=int, default=MAX_GAP_FRAMES)
+    ap.add_argument("--max-jump-bh", type=float, default=MAX_JUMP_BH, help="max ground-point move per frame, in body heights")
+    ap.add_argument("--max-off-floor", type=float, default=MAX_OFF_FLOOR)
+    ap.add_argument("--reach-bh", type=float, default=REACH_BH,
                     help="enter clips should come within this target distance (body heights); pass clips not within 0.4x of it")
-    ap.add_argument("--area-tol", type=float, default=0.03)
-    ap.add_argument("--area-sum-max", type=float, default=1.15)
-    ap.add_argument("--cluster-tol", type=float, default=0.04, help="scene fingerprint distance (floor/door share, floor top) for the same-location grouping")
+    ap.add_argument("--area-tol", type=float, default=AREA_TOL)
+    ap.add_argument("--area-sum-max", type=float, default=AREA_SUM_MAX)
+    ap.add_argument("--cluster-tol", type=float, default=CLUSTER_TOL, help="scene fingerprint distance (floor/door share, floor top) for the same-location grouping")
     args = ap.parse_args()
 
     sources = {}
