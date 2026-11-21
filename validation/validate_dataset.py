@@ -196,7 +196,7 @@ HINTS = {
     "TRAJ_TIME": "Trajectory time stamps are not increasing. Inspect t in the trajectory JSON.",
     "DETECTED_COUNT_MISMATCH": "Detected-frame counts differ between clips.csv, trajectory and frames with a centre.",
     "LABEL_RECOMPUTE": "The tracker's own rule (last centre inside the door ellipse = enter) gives another label. Label was edited or the files are mixed up.",
-    "LABEL_BORDERLINE": "The person ends right at the enter/pass boundary: the label is a coin flip. Look at the debug image; consider excluding it.",
+    # "LABEL_BORDERLINE": "The person ends right at the enter/pass boundary: the label is a coin flip. Look at the debug image; consider excluding it.",
     "TRACKS_EMPTY": "No rows found in clips.csv. Check the tracks folder path (--tracks).",
     "NO_TRACKS": "No tracks folder found, so label and trajectory cross-checks were skipped.",
     "CLIP_FOLDER_MISSING": "clips.csv says keep but there is no clip folder. The clip was lost in transfer or never delivered.",
@@ -567,8 +567,9 @@ def check_tracks(clip_dir, clip_id, prefix, info, label, frames, W, H, sha_f, tr
         if label in ("enter", "pass") and ("enter" if value <= 1 else "pass") != label:
             issues.add(clip_id, "ERROR", "LABEL_RECOMPUTE",
                        f"label {label} but the last centre {centers[-1]} gives ellipse value {value:.2f} (<=1 means enter)")
-        if label in ("enter", "pass") and not math.isinf(value) and abs(value - 1) <= args.borderline:
-            issues.add(clip_id, "INFO", "LABEL_BORDERLINE", f"ellipse value {value:.2f}: ends close to the enter/pass boundary")
+        # LABEL_BORDERLINE is disabled; retain ellipse recomputation for end_ellipse_value and LABEL_RECOMPUTE.
+        # if label in ("enter", "pass") and not math.isinf(value) and abs(value - 1) <= args.borderline:
+        #     issues.add(clip_id, "INFO", "LABEL_BORDERLINE", f"ellipse value {value:.2f}: ends close to the enter/pass boundary")
 
 
 # ----------------------------------------------------------------------------- one clip
