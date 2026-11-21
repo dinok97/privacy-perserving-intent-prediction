@@ -281,11 +281,14 @@ def undistort_video(video_path, out_path, lens, balance=BALANCE):
     return n
 
 
-def correct_video(video_path, balance=BALANCE):
+def correct_video(video_path, balance=BALANCE, lens=None):
     """Checks a video for fisheye distortion and undistorts it when needed.
 
     Copies the input into [TEMP]_undistorted_results and returns the usable video
     path there. The lens JSON is written into the same folder.
+
+    lens: a lens already estimated for this camera placement (see placement.py).
+    It is applied as it is, without detecting a lens on this video.
     """
     video_path = Path(video_path)
     result_dir = video_path.parent / "[TEMP]_undistorted_results"
@@ -294,7 +297,10 @@ def correct_video(video_path, balance=BALANCE):
     if video_path.resolve() != staged_video.resolve():
         shutil.copy2(video_path, staged_video)
 
-    lens = detect_distortion(median_background(staged_video)[0])
+    if lens is None:
+        lens = detect_distortion(median_background(staged_video)[0])
+    else:
+        lens = dict(lens)
     lens["video"] = video_path.name
     result = staged_video
 
@@ -339,13 +345,16 @@ def _empty_staging_folders(videos):
             shutil.rmtree(folder)
 
 
-def correct_videos(videos: list[str], on_progress=None, failures=None, fail_fast=False):
+def correct_videos(videos: list[str], on_progress=None, failures=None, fail_fast=False, lens=None):
     """Correct every video; on_progress, if given, is called after each one.
 
     A video that fails is skipped (its staged copy is removed so the tracker
     cannot pick it up) and added to failures as {'video', 'stage', 'error'};
     with fail_fast=True the error is raised instead. on_progress(ok=False) is
     called for a failed video.
+
+    lens: one lens for all videos (from the approved placement); without it every
+    video gets its own estimate.
 
     Returns the paths of the videos that can go on to tracking.
     """
@@ -356,7 +365,7 @@ def correct_videos(videos: list[str], on_progress=None, failures=None, fail_fast
     usable = []
     for video in videos:
         try:
-            result = correct_video(video)
+            result = correct_video(video, lens=lens)
         except Exception as error:
             if fail_fast:
                 raise
@@ -371,12 +380,12 @@ def correct_videos(videos: list[str], on_progress=None, failures=None, fail_fast
         usable.append(result)
         lens_path = Path(result).parent / f"{Path(video).stem}_lens.json"
         with open(lens_path) as f:
-            lens = json.load(f)
-        verdict = "DISTORTED" if lens["distorted"] else "not distorted"
-        print(f"[UNDISTORT] {Path(video).name}: {verdict} ({lens['reason']}, {lens['n_chains']} edge chains)")
-        if lens["distorted"]:
-            print(f"  focal length {lens['K'][0][0]:.0f} px, corner distortion "
-                  f"{100 * lens['corner_distortion']:.0f} %, saved {result}")
+            saved = json.load(f)
+        verdict = "DISTORTED" if saved["distorted"] else "not distorted"
+        print(f"[UNDISTORT] {Path(video).name}: {verdict} ({saved['reason']}, {saved['n_chains']} edge chains)")
+        if saved["distorted"]:
+            print(f"  focal length {saved['K'][0][0]:.0f} px, corner distortion "
+                  f"{100 * saved['corner_distortion']:.0f} %, saved {result}")
         else:
             print(f"  use the staged video: {result}")
         if on_progress:

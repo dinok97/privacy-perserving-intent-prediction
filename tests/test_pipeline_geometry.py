@@ -139,6 +139,8 @@ class PipelineCleanupContracts(unittest.TestCase):
         source.mkdir()
         (source / 'input.mp4').touch()
         staging = []
+        (source / '[TEMP]_undistorted_results').mkdir()
+        (source / '[TEMP]_undistorted_results' / 'staged.mp4').write_bytes(b'private video')
 
         def failed_tracker(videos, source_dir, tracks, manifest, *args):
             staging.append(tracks.parent)
@@ -150,12 +152,16 @@ class PipelineCleanupContracts(unittest.TestCase):
 
         with patch.object(clean_datasource, 'clean_videos', return_value={
             'duplicates': [], 'too_short': [], 'low_fps': []}):
-            with patch.object(pipeline, 'run_trajectory_tracker', side_effect=failed_tracker):
+            placement = {'lens': None, 'background': output / 'placement/background.png',
+                         'scene': output / 'placement/background.json', 'reused': False}
+            with patch.object(pipeline, 'run_placement', return_value=placement), \
+                    patch.object(pipeline, 'run_trajectory_tracker', side_effect=failed_tracker):
                 with self.assertLogs('pipeline', level='ERROR'), self.assertRaisesRegex(RuntimeError, 'Tracking failed'):
                     pipeline.run_pipeline(source_dir=source, output=output, with_3d=True, skip_undistort=True)
         self.assertEqual(len(staging), 1)
         self.assertFalse(staging[0].exists())
         self.assertFalse(any(output.rglob('*.mp4')))
+        self.assertFalse((source / '[TEMP]_undistorted_results').exists())  # no video is left, even after a failure
 
 
 class JoinContracts(unittest.TestCase):
@@ -272,40 +278,54 @@ class TrackingAdapter(unittest.TestCase):
 
 class TrackerClock(unittest.TestCase):
     def test_runner_passes_paths_and_device_to_existing_collector(self):
-        collector = Mock(processed_video_paths=['/saved/clip.mp4'])
+        collector = Mock(processed_records=[{'video': '/saved/clip.mp4'}])
         with patch.object(video_processor, 'LivePoseCollector', return_value=collector) as factory:
             result = video_processor.run(source_dir='inputs', output_root='outputs',
-                processed_manifest='outputs/clips.json', device='cpu')
+                processed_manifest='outputs/clips.json', device='cpu', videos=['inputs/a.mp4'])
         cfg = factory.call_args.args[0]
         self.assertEqual(cfg.source_dir, 'inputs')
         self.assertEqual(cfg.output_root, 'outputs')
         self.assertEqual(cfg.processed_manifest, 'outputs/clips.json')
-        self.assertEqual(result, ['/saved/clip.mp4'])
-        collector.run.assert_called_once_with(display=False, on_progress=None, failures=None, fail_fast=False)
+        self.assertEqual(cfg.source_videos, ['inputs/a.mp4'])
+        self.assertEqual(result, [{'video': '/saved/clip.mp4'}])
+        collector.run.assert_called_once_with(on_progress=None, failures=None, fail_fast=False)
 
-    def test_offline_tracking_uses_video_time_not_processing_time(self):
+    def test_whole_video_is_read_frame_by_frame_with_video_frame_indices(self):
         import cv2
         tracker = object.__new__(video_processor.LivePoseCollector)
-        tracker.cv2 = cv2
-        tracker.cfg = SimpleNamespace(distort=False, save_clips=False, debug=False, status_every_s=1e9)
+        tracker.cfg = SimpleNamespace(min_duration_s=.5)
         tracker.source_clip_counts = {}
         tracker.active = {}
-        tracker.record_fps = 12.
-        tracker._fps_frames = 0
-        tracker._fps_t0 = tracker._status_t0 = time.time()
+        tracker.finished = []
         cap = Mock()
+        cap.isOpened.return_value = True
         cap.get.side_effect = lambda code: {cv2.CAP_PROP_FRAME_WIDTH: 640, cv2.CAP_PROP_FRAME_HEIGHT: 480,
-                                          cv2.CAP_PROP_FPS: 12}[code]
+                                          cv2.CAP_PROP_FPS: 12, cv2.CAP_PROP_FRAME_COUNT: 3}[code]
         cap.read.side_effect = [(True, object()) for _ in range(3)] + [(False, None)]
-        tracker._open_source = Mock(return_value=cap)
-        tracker._init_geometry = Mock()
-        tracker._undistort = lambda image: image
-        times = []
-        tracker._process_frame = lambda image, timestamp: times.append(timestamp) or []
-        self.assertTrue(tracker._run_source(Path('clip.mp4'), display=False))
-        self.assertEqual(times, [0., 1 / 12, 2 / 12])
+        tracker.cv2 = SimpleNamespace(VideoCapture=Mock(return_value=cap), CAP_PROP_FRAME_WIDTH=cv2.CAP_PROP_FRAME_WIDTH,
+                                      CAP_PROP_FRAME_HEIGHT=cv2.CAP_PROP_FRAME_HEIGHT, CAP_PROP_FPS=cv2.CAP_PROP_FPS,
+                                      CAP_PROP_FRAME_COUNT=cv2.CAP_PROP_FRAME_COUNT)
+        indices = []
+        tracker._process_frame = lambda frame, index: indices.append(index)
+        with patch('builtins.print'):
+            tracker._run_source(Path('clip.mp4'))
+        self.assertEqual(indices, [0, 1, 2])  # the time of a frame is index / fps, never the processing time
+        self.assertEqual(tracker.fps, 12.)
+        self.assertEqual(tracker.min_frames, 6)
         cap.release.assert_called_once()
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CountPeopleTests(unittest.TestCase):
+    def test_several_people_in_one_video_give_more_clips_than_videos(self):
+        records = [{'video': Path('a.mp4')}, {'video': Path('a.mp4')}, {'video': Path('a.mp4')}, {'video': Path('b.mp4')}]
+        counts = pipeline.count_people(records, videos_found=5, videos_tracked=5)
+        self.assertEqual(counts, {'videos_found': 5, 'videos_tracked': 5, 'videos_with_people': 2,
+                                  'people_tracked': 4, 'videos_with_several_people': 1,
+                                  'most_people_in_one_video': 3})
+
+    def test_no_records(self):
+        self.assertEqual(pipeline.count_people([])['people_tracked'], 0)

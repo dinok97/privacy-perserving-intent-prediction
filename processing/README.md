@@ -9,8 +9,8 @@ repository root.
 | 1 | `clean_datasource.py` | Moves duplicate , too short, and low FPS videos out of the input folder. | `<source-dir>/deleted/duplicated/`, `<source-dir>/deleted/too_short/`, `<source-dir>/deleted/low_fps/` |
 | 2 | `fisheye_correction.py` | Checks if the video has fisheye distortion and undistorts it if so. | `<video>_undistorted.mp4`, `<video>_lens.json` |
 | 3 | `video_processor.py` | Tracks people (YOLO pose), cuts one clip per person and labels it enter / pass / exit. Based on Jesper's code. | `<clip>.mp4`, `<clip>.json` (trajectory + keypoints), `<clip>_pose.json` |
-| 4 | `background_extraction.py` | Makes an image of the empty room by masking out people and taking the median over frames. Pixelates anyone still visible. | `<clip>_background.png` |
-| 5 | `background_segmentation.py` | Finds floor, walls, doors and windows in that image with SAM 3. | `<clip>_background.json` (polygons), `_overlay.png` |
+| 4 | `background_extraction.py`, `placement.py` | Makes an image of the empty room by masking out people and taking the median over frames. Pixelates anyone still visible. `placement.py` runs it once per run, estimates the lens on it and asks a person to approve it. | `placement/background.png`, `placement/placement.json` |
+| 5 | `background_segmentation.py` | Finds floor, walls, doors and windows in the approved background with SAM 3, once. | `placement/background.json` (polygons), `background_overlay.png` |
 | 6 | `feature_extractor.py` | Combines the person's trajectory with the scene into per-frame features. | `<clip>_features.json` |
 
 `<clip>` is the video name, with `_2`, `_3`, … when one video has several

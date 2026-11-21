@@ -51,11 +51,11 @@ privacy-perserving-intent-prediction/
 ```
 video
   │ 1. video cleanup           move unsuitable videos (duplicate, too short, etc) out of the input folder
-  │ 2. fisheye correction      undistort the video if the lens bends straight lines
-  │ 3. trajectory tracking     YOLO pose → one clip per person, labelled enter / pass / exit
-  │ 4. background extraction   image of the empty room, people masked out
-  │ 5. segmentation            SAM 3 → floor / wall / door / window polygons
-  │ 6. feature extraction      person + scene → features per frame
+  │ 2. background + segmentation  ONE background per run (a person approves it in the terminal),
+  │                               its lens, and SAM 3 → floor / wall / door / window polygons, once
+  │ 3. fisheye correction      undistort every video with that one lens
+  │ 4. trajectory tracking     YOLO pose → per-person trajectory, labelled enter / pass / exit
+  │ 5. feature extraction      person + scene → features per frame (brightness measured per clip)
   ▼
 <clip>_features.json
   │ 7. (optional) 3D           depth → distances to doors in estimated metres
@@ -66,7 +66,14 @@ configured source directory. Duplicate files, videos that are too short, and
 videos that has low FPS are moved to `<source-dir>/deleted/duplicated/`,
 `<source-dir>/deleted/too_short/`, and `<source-dir>/deleted/low_fps/`, respectively.
 
-Then, the video is undistorted **first** (optional), so the person's trajectory and the scene
+Then the background is made **once**: the first video (file name order) gives a candidate in
+`<output>/placement/candidate.png` and the terminal asks whether to use it (`n` tries the next
+video). SAM 3 segments the approved background once and the same lens is applied to every video.
+The result stays in `<output>/placement/` together with the run's data. An existing placement
+from an earlier run is offered for reuse and still has to be approved; a video with another
+frame size stops the run. This step needs a terminal to answer in.
+
+Then, the videos are undistorted (optional), so the person's trajectory and the scene
 are in the same geometry. What each script does is in
 [processing/README.md](processing/README.md).
 
@@ -131,33 +138,35 @@ Put videos in `source/`, then:
 python pipeline.py
 ```
 
-This runs steps 1–5 on every video and writes to `data/pipeline/`.
+This runs steps 1–5 on every video and writes to `data/pipeline/<input folder name>/`, e.g. `data/pipeline/masterdata_enter/`. Every input folder gets its own `placement/` (background), `pipeline_run.json` and logs.
 
 | Option | Use |
 |---|---|
 | `--source-dir DIR` | read videos from another folder |
-| `--output DIR` | write somewhere other than `data/pipeline/` |
+| `--output DIR` | write somewhere other than `data/pipeline/<input folder name>/` |
 | `--device cuda` | run YOLO on the GPU |
 | `--skip-undistort` | keep the original image geometry |
 | `--fail-fast` | stop at the first failing clip instead of skipping it |
 | `--show-output` | also show the raw output of YOLO / SAM 3 in the console |
-| `--debug` | also keep supporting files in `output directory`, in addition to extracted features |
+| `--debug` | also keep the per-clip feature debug images and `processed_video_paths.json`. No video is ever kept: the temporary undistorted videos are deleted at the end of every run |
 
 When moving the camera, check the door entrance region (`ellipse_axes` in
 `processing/video_processor.py`), since the enter / pass / exit labels depend on it.
 
 ### 5.2 Reusing saved clips
 
-To skip fisheye correction and tracking (and SAM 3, if scenes are given), list
-existing clips in a manifest. Paths are relative to the manifest file:
+To skip fisheye correction and tracking, list existing clips in a manifest. The videos
+must still exist: a normal run deletes its temporary undistorted videos, so this works for
+runs with `--skip-undistort` (the manifest is kept with `--debug`) or for videos you keep
+yourself. The background is made once for the run (see the Pipeline section), so `scene` and
+`background` entries are ignored. Paths are relative to the manifest file:
 
 ```json
 [
   {
     "video": "videos/clip.mp4",
     "trajectory": "data/existing/clip.json",
-    "pose": "data/existing/clip_pose.json",
-    "scene": "data/existing/clip_background.json"
+    "pose": "data/existing/clip_pose.json"
   }
 ]
 ```
