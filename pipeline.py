@@ -374,7 +374,8 @@ def run_placement(videos, directory, undistort):
     return result
 
 
-def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=None, assumed_width=.825, *, debug=True):
+def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=None, assumed_width=.825,
+                          *, debug=True, shareable_depth_preview=None):
     from processing import feature_extractor
     name = record['video'].name
     trajectory = record['trajectory']
@@ -398,7 +399,8 @@ def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=
               'source_video_sha256': record['video_info']['sha256'], 'geometry_3d': None}
     if with_3d:
         logger.debug('%s: running 3D geometry', name)
-        directory, summary = geometry.run_geometry(record, runs_root, command_config, assumed_width)
+        directory, summary = geometry.run_geometry(record, runs_root, command_config, assumed_width,
+                                                   shareable_depth_preview=shareable_depth_preview)
         features = geometry.join_geometry(features, geometry.load(trajectory),
                                            geometry.load(directory / 'trajectory_3d.json'), summary)
         features['info']['sources']['depth'] = str(directory / 'ground_geometry.json')
@@ -408,6 +410,8 @@ def run_feature_extractor(record, with_3d=False, runs_root=None, command_config=
             logger.warning('%s: only %.0f%% of frames have valid 3D', name, 100 * valid / total)
         result['geometry_3d'] = {'directory': str(directory), 'viewer': str(directory / 'viewer.html'),
                                   'valid_frames': valid, 'total_frames': total, 'yolo_rerun': False}
+        if shareable_depth_preview is not None:
+            result['geometry_3d']['shareable_depth_preview'] = summary['shareable_depth_preview']
     geometry.save(out, features)
     logger.debug('%s: features written to %s', name, out)
     return result
@@ -467,14 +471,26 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
                  fail_fast=False, 
                  log_file=None,
                  debug=False,
-                 privacy_tiers=True):
+                 privacy_tiers=True,
+                 shareable_depth_preview_dir=None):
     output = Path(output).resolve()
+    if shareable_depth_preview_dir is not None:
+        if not with_3d:
+            raise ValueError('--shareable-depth-preview-dir requires --with-3d')
+        shareable_depth_preview_dir = Path(shareable_depth_preview_dir).resolve()
+        if shareable_depth_preview_dir.is_relative_to(output) or output.is_relative_to(shareable_depth_preview_dir):
+            raise ValueError('Choose a shareable preview directory separate from --output')
+        if shareable_depth_preview_dir.exists() and (
+                not shareable_depth_preview_dir.is_dir() or any(shareable_depth_preview_dir.iterdir())):
+            raise ValueError('Choose a new or empty shareable preview directory')
     if with_3d and ((output / 'tracks').exists() or any(
             not (workspace / '.depth-only').is_file() for workspace in output.glob('*/geometry_3d'))):
         message = 'This output directory may contain video from an older run; use a fresh --output directory.'
         logger.error(message)
         raise ValueError(message)
     output.mkdir(parents=True, exist_ok=True)
+    if shareable_depth_preview_dir is not None:
+        shareable_depth_preview_dir.mkdir(parents=True, exist_ok=True)
     source_dir = Path(source_dir).resolve()
     reused_tracking = processed_manifest is not None
     summary = {'status': 'running', 'with_3d': with_3d, 'reused_tracking': reused_tracking,
@@ -545,13 +561,15 @@ def run_pipeline(*, source_dir=SOURCE_DIR,
 
         ready = [r for r in records if 'error' not in r]
         with stage('Feature extraction', len(ready)) as progress:
-            for record in ready:
+            for clip_number, record in enumerate(ready, start=1):
                 name = record['video'].name
+                preview = (shareable_depth_preview_dir / f'clip_{clip_number:04d}.mp4'
+                           if shareable_depth_preview_dir is not None else None)
                 logger.debug('Feature extraction: %s', name)
                 try:
                     summary['clips'].append(run_feature_extractor(
                         record, with_3d, lingbot_runs, lingbot_command_config, assumed_width,
-                        debug=debug or not with_3d))
+                        debug=debug or not with_3d, shareable_depth_preview=preview))
                 except Exception as error:
                     if fail_fast:
                         raise
@@ -617,6 +635,8 @@ def main():
                              'gets its own background and run summary). Use a fresh directory for 3D after upgrading from an older version.')
     parser.add_argument('--processed-manifest', type=Path, help='Reuse saved clips/trajectory JSON; skip fisheye and YOLO stages')
     parser.add_argument('--with-3d', action='store_true', help='Append LingBot distances and closure rates to 2D features')
+    parser.add_argument('--shareable-depth-preview-dir', type=Path,
+                        help='With --with-3d, write depth-coloured box videos to a separate new or empty directory')
     parser.add_argument('--lingbot-runs', type=Path, default=PROJECT / 'data/lingbot')
     parser.add_argument('--lingbot-config', '--lingbot-command-config', dest='lingbot_command_config',
                         type=Path, help='LingBot local/ssh-docker runtime JSON (or custom command argv/cwd)')
@@ -632,6 +652,8 @@ def main():
     parser.add_argument('--no-privacy-tiers', action='store_true',
                         help='Do not write the <clip>_features_F1/F2/F3/F4.json files (privacy/strip_features.py can make them later)')
     args = parser.parse_args()
+    if args.shareable_depth_preview_dir is not None and not args.with_3d:
+        parser.error('--shareable-depth-preview-dir requires --with-3d')
     
     CAPTURE_OUTPUT = not args.show_output
     if args.output is None:  # one output folder per input folder
@@ -656,6 +678,7 @@ def main():
                 log_file=log_file,
                 debug=args.debug,
                 privacy_tiers=not args.no_privacy_tiers,
+                shareable_depth_preview_dir=args.shareable_depth_preview_dir,
             )
     except Exception:
         sys.exit(1)  # already logged with traceback

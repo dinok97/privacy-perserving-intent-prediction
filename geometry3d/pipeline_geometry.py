@@ -53,7 +53,7 @@ def video_info(path):
 
 
 def records_from_manifest(path):
-    """Accept Dino's path list or explicit {video, trajectory, scene, pose} records."""
+    """Accept a path list or explicit clip records with optional scene, pose and preview settings."""
     path = resolve_project_path(Path(path).resolve())
     items = load(path)
     if not isinstance(items, list) or not items:
@@ -274,7 +274,7 @@ def publish_depth_run(provider_output, manifest, info, config_hash):
         marker.replace(manifest)
 
 
-def run_geometry(record, runs_root, command_config=None, assumed_width=.825):
+def run_geometry(record, runs_root, command_config=None, assumed_width=.825, *, shareable_depth_preview=None):
     from . import background_depth, segment_background_3d, door_distance_3d
     video = record['video']
     info = record['video_info']
@@ -297,6 +297,15 @@ def run_geometry(record, runs_root, command_config=None, assumed_width=.825):
         summary = door_distance_3d.main(['--background', str(segments / depth_source['stem']),
             '--tracking', str(record['tracking']), '--video', str(video), '--output', str(output),
             '--door-width-m', str(assumed_width)])
+    if shareable_depth_preview is not None:
+        from .shareable_depth_preview import render_preview
+        summary['shareable_depth_preview'] = render_preview(
+            manifest.parent / depth_source['stem'],
+            load(record['tracking'] / 'detections.json'),
+            load(segments / depth_source['stem'] / 'aligned_scene.json'),
+            info['fps'], shareable_depth_preview,
+            background_frame=record.get('shareable_depth_background_frame'),
+        )
     return output, summary
 
 
