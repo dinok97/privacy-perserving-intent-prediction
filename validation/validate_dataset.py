@@ -3,12 +3,15 @@
 
 Input: one or more SOURCE folders, each holding one clip folder per clip:
 
-    <source>/<clip_folder>/{*_background.png, *_background_overlay.png, *_features_debug.png,
-                            *_background.json, *_features.json}
+    <source>/<clip_folder>/{*_features.json, *_features_debug.png, *_features_F1..F4.json}
+    <source>/placement/{background.png, background.json, background_overlay.png, placement.json}
+
+The placement folder is the run's one shared background (it is not a clip). Older runs have the three
+background files per clip instead (<clip>_background.*); both layouts are read.
 
 A source is one pipeline run / one input folder of videos (e.g. masterdata_enter, masterdata_pass).
 Its name is only a tag: the real class of each clip is info.label (the tracker's label), and the
-report shows the source-by-label table. Sub-folders called logs, tracks or [TEMP]* are skipped.
+report shows the source-by-label table. Sub-folders called logs, tracks or [TEMP]* are skipped; placement is checked once, as the shared background.
 
 If <source>/tracks exists (the tracker output: clips.csv, <clip>.json, <clip>_pose.json) every clip is
 also cross-checked against it: clips.csv row, label (also recomputed from the trajectory with the
@@ -59,7 +62,14 @@ FILES = {  # role -> required filename suffix
     "debug_img": "_features_debug.png",
 }
 LABELS = {"enter", "pass", "exit"}
-SKIP_DIRS = {"logs", "tracks"}  # the pipeline writes these next to the clip folders
+FPS_SPREAD = 1.0  # fps values closer than this are not reported as mixed (measured frame rate wobbles by about 1)
+PLACEMENT_DIR = "placement"  # one shared background, lens and segmentation per run (processing/placement.py)
+SKIP_DIRS = {"logs", "tracks", PLACEMENT_DIR}  # the pipeline writes these next to the clip folders (none is a clip)
+PLACEMENT_FILES = {"scene": "background.json", "background_img": "background.png",
+                   "overlay_img": "background_overlay.png", "meta": "placement.json"}
+SHARED_ROLES = ("scene", "background_img", "overlay_img")  # per clip in older runs, in placement/ since the shared background
+TIER_FILE = re.compile(r"_features_F[1-4]\.json$")      # privacy tiers written next to each features.json
+TIERS = ("F1", "F2", "F3", "F4")
 FRAME_BLOCKS = ("pos", "kin", "pose", "scene_rel", "geometry_3d")
 
 
@@ -138,8 +148,8 @@ OUTLIER_KINDS = {
         "The person is detected in unusually few frames of the clip: often lost (occlusion, poor pose). Open the debug image."),
     "floor_frac": (
         "OUTLIER_LARGE_FLOOR", "OUTLIER_SMALL_FLOOR",
-        "The floor covers far more of the image than usual: a different location or camera height, or floor segmented onto walls. Open the overlay.",
-        "The floor covers far less of the image than usual: a different location or camera height; zero or near zero is a bad segmentation. Open the overlay."),
+        "The floor covers far more of the image than usual: a different location or camera height, or floor segmented onto walls. Open the overlay (placement/background_overlay.png).",
+        "The floor covers far less of the image than usual: a different location or camera height; zero or near zero is a bad segmentation. Open the overlay (placement/background_overlay.png)."),
     "brightness_mean": (
         "OUTLIER_BRIGHT_SCENE", "OUTLIER_DARK_SCENE",
         "The background is much brighter than the rest: a different lighting condition, which is what you want in the data.",
@@ -154,6 +164,9 @@ HINTS = {
     "FILE_MISSING": "Open the clip folder: one of the 5 expected files is absent. Ask the supervisors to re-send that clip.",
     "FILE_DUPLICATE": "Two files match the same role (e.g. two *_features.json). Remove or ask which one is the real one.",
     "FILE_EMPTY": "A 0-byte file: broken copy or crashed write. Re-copy it from the source; if still empty, re-run the clip.",
+    "PLACEMENT_FOLDER_MISSING": "The log says the run used one shared background, but the placement/ folder was not delivered. The scene checks cannot be made; ask for the folder.",
+    "PLACEMENT_FILE_MISSING": "The shared background of the run (placement/) lacks a file. Re-run the pipeline so the background is approved and segmented again.",
+    "TIER_FILE_MISSING": "A clip lacks some of its privacy-tier files (_features_F1..F4.json). Re-run the pipeline's privacy-tier step for it.",
     "FILE_EXTRA": "Unexpected extra files in the clip folder. Usually harmless (e.g. a pose file); check they are not leftovers.",
     "PNG_INVALID": "The image is not a valid PNG (truncated or renamed). Open it; re-copy or re-send.",
     "IMAGE_SIZE_MISMATCH": "The three images of this clip have different sizes. Open them side by side; the clip was probably mixed up.",
@@ -167,10 +180,10 @@ HINTS = {
     "SOURCE_NAME_MISMATCH": "info.sources names a different file than the one in the folder: files may have been renamed or swapped.",
     "SHA_MISMATCH": "features.json and background.json were made from different videos. The background belongs to another clip: re-run or swap in the right file.",
     "FRAME_SIZE_MISMATCH": "frame size in features.json differs from background.json. They come from different videos or settings.",
-    "NO_FLOOR": "The segmentation found no floor, so exits and floor features are meaningless. Open *_background_overlay.png.",
-    "NO_DOOR": "No door segmented. Open *_background_overlay.png; the target and exit features may be wrong.",
+    "NO_FLOOR": "The segmentation found no floor, so exits and floor features are meaningless. Open placement/background_overlay.png (older runs: *_background_overlay.png in the clip folder).",
+    "NO_DOOR": "No door segmented. Open placement/background_overlay.png; the target and exit features may be wrong.",
     "POLYGON_DEGENERATE": "A polygon with fewer than 3 points. Minor; check the overlay image.",
-    "POLYGON_OUT_OF_FRAME": "A polygon leaves the image. Check *_background_overlay.png for a bad mask.",
+    "POLYGON_OUT_OF_FRAME": "A polygon leaves the image. Check placement/background_overlay.png for a bad mask.",
     "CONFIDENCE_RANGE": "A segmentation confidence is outside 0..1. Corrupt background.json.",
     "FLOOR_AREA_MISMATCH": "Floor area in the polygons differs from floor_frac in features.json. The two files may come from different runs.",
     "POLYGON_COUNT_MISMATCH": "used + dropped polygons does not equal the number of objects. Check that background.json was not edited.",
@@ -221,7 +234,7 @@ HINTS = {
     "NO_TRACKS": "No tracks folder found, so label and trajectory cross-checks were skipped.",
     "CLIP_FOLDER_MISSING": "clips.csv says keep but there is no clip folder. The clip was lost in transfer or never delivered.",
     "CSV_STALE_ROWS": "Rows from a failed or earlier run; ignored. Nothing to do.",
-    "FILES_NOT_DELIVERED": "Images/background.json are in none of the folders (pipeline run without --debug). Only features.json is checked; the visual checks (overlay, debug image) are not possible.",
+    "FILES_NOT_DELIVERED": "Per-clip files that are in none of the clip folders (usually the debug image: pipeline run without --debug). Only features.json is checked; the visual checks that need them are skipped.",
     "SHA_MISSING": "features.json has no video SHA, so the chain video -> background -> trajectory cannot be checked.",
     "SOURCE_EMPTY": "No clip folders in this source. Check the path you gave.",
     "CLIP_COUNT": "Number of clip folders differs from what clips.csv / --expect says. See log_vs_folders.csv for which ones.",
@@ -246,7 +259,7 @@ HINTS = {
     "VARIANT_PARAMS_KEY": "Some clips were made with other parameters than most. Do not mix them without checking info.params.",
     "VARIANT_GIT_COMMIT": "Some clips were made with another code version. Check info.trajectory_meta.git_commit.",
     "VARIANT_SCHEMA": "Mixed schema versions in one dataset.",
-    "MIXED_FPS": "Videos were recorded at different FPS. Consider re-sampling to a common FPS before training.",
+    "MIXED_FPS": "Videos were recorded at different FPS (more than 1 fps apart). Consider re-sampling to a common FPS before training.",
     "MIXED_SESSION": "Several tracking sessions (normally one per run). Check they match the logs.",
     "MIXED_WIDTH": "Frames have different widths. Pixel features are not comparable without scaling.",
     "MIXED_HEIGHT": "Frames have different heights. Pixel features are not comparable without scaling.",
@@ -425,6 +438,7 @@ RE_SESSION = re.compile(r"\[DONE\] session (\d+): (\{.*?\})\s+reasons=(\{.*\})\s
 RE_INIT = re.compile(r"\[INIT\] video source: (.+)$")
 RE_GEOM = re.compile(r"\[GEOM\] frame=(\d+)x(\d+) record_fps=([\d.]+)")
 RE_SEGMENT = re.compile(r"^Segmenting (.+)_background\.png\.\.\.$")
+RE_PLACEMENT = re.compile(r"^Background - (approved|reused): (.+)$")
 
 
 def basename(path_text):
@@ -435,7 +449,8 @@ def parse_log(path):
     """What one pipeline_<time>.log says about its run (only the lines this validator needs)."""
     run = {"file": path.name, "started": None, "status": "incomplete", "n_ok": None, "n_failed": None,
            "duration_s": None, "stages": [], "problems": [], "workspaces": {}, "written": set(),
-           "background": set(), "segmented": set(), "sessions": {}, "fps": {}, "stage_failed": None}
+           "background": set(), "segmented": set(), "sessions": {}, "fps": {}, "stage_failed": None,
+           "placement": None}
     last_video = None
     with open(path, encoding="utf-8", errors="replace") as f:
         for raw in f:
@@ -460,6 +475,8 @@ def parse_log(path):
                     run["written"].add(m2[1])
                 elif m2 := RE_BACKGROUND.match(msg):
                     run["background"].add(m2[1])
+                elif m2 := RE_PLACEMENT.match(msg):
+                    run["placement"] = (m2[1], m2[2])  # one background for the whole run
             elif logger == "pipeline.stdout":
                 if m2 := RE_SESSION.search(msg):
                     try:
@@ -538,6 +555,8 @@ def check_logs(source, logs, rows, csv_stat, issues, diff_rows):
     no_features = [run["workspaces"][c] for c in run["workspaces"] if c not in run["written"]]
     report_names(issues, source, "ERROR", "LOG_NO_FEATURES", no_features, "announced in the log but no 'features written' line", diff_rows)
     not_segmented = [run["workspaces"][c] for c in run["written"] if c in run["workspaces"] and c not in run["segmented"]]
+    if run["placement"]:
+        not_segmented = []  # one shared background is segmented once ('Segmentation 1/1'), not once per clip
     if not_segmented:
         issues.add(source, "INFO", "LOG_NOT_SEGMENTED", f"{len(not_segmented)} clip(s) have no 'Segmenting' line (existing scene reused?)")
 
@@ -749,7 +768,7 @@ def check_clip_files(clip_dir, clip_id, issues, optional):
         found[role] = match[0]
         if match[0].stat().st_size == 0:
             issues.add(clip_id, "ERROR", "FILE_EMPTY", match[0].name)
-    extra = {p.name for p in clip_dir.iterdir()} - {p.name for p in found.values()}
+    extra = {p.name for p in clip_dir.iterdir() if not TIER_FILE.search(p.name)} - {p.name for p in found.values()}
     if extra:
         issues.add(clip_id, "INFO", "FILE_EXTRA", ", ".join(sorted(extra)))
     sizes = {}
@@ -765,7 +784,62 @@ def check_clip_files(clip_dir, clip_id, issues, optional):
     return found, sizes, len(found)
 
 
-def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozenset()):
+def scene_object_checks(scene, W, H, clip_id, issues):
+    """Polygon checks of a background.json; returns the floor area in px. clip_id=None only measures (no issues)."""
+    floor_area = 0.0
+    for o in scene.get("objects") or []:
+        poly = o.get("polygon") or []
+        if len(poly) < 3:
+            if clip_id:
+                issues.add(clip_id, "WARN", "POLYGON_DEGENERATE", f"{o.get('label')} polygon with {len(poly)} points")
+            continue
+        if clip_id and W and H and any(not (-2 <= x <= W + 2 and -2 <= y <= H + 2) for x, y in poly):
+            issues.add(clip_id, "WARN", "POLYGON_OUT_OF_FRAME", f"{o.get('label')} polygon leaves the frame")
+        if clip_id and not 0 <= o.get("confidence", 0) <= 1:
+            issues.add(clip_id, "WARN", "CONFIDENCE_RANGE", f"{o.get('label')} confidence {o.get('confidence')}")
+        if o.get("label") == "floor":
+            floor_area += shoelace(poly)
+    return floor_area
+
+
+def check_placement(path, source, issues):
+    """The run's shared background (<source>/placement/). Returns {'scene', 'size'} or None when there is none.
+
+    The scene-level checks (floor, door, polygons) are made here once; they used to be repeated for every clip."""
+    folder = path / PLACEMENT_DIR
+    if not folder.is_dir():
+        return None
+    pid = f"{source}/{PLACEMENT_DIR}"
+    found = {}
+    for role, name in PLACEMENT_FILES.items():
+        f = folder / name
+        if not f.is_file() or f.stat().st_size == 0:
+            if role in ("scene", "background_img", "meta"):
+                issues.add(pid, "ERROR", "PLACEMENT_FILE_MISSING", f"{name} is missing or empty in {folder}")
+            continue
+        found[role] = f
+    scene = load_json(found["scene"], pid, issues) if "scene" in found else None
+    meta = load_json(found["meta"], pid, issues) if "meta" in found else None
+    size = png_size(found["background_img"]) if "background_img" in found else None
+    if "background_img" in found and size is None:
+        issues.add(pid, "ERROR", "PNG_INVALID", "background.png is not a valid PNG header")
+    if scene is not None:
+        W, H = (scene.get("image_size") or [None, None])[:2]
+        if size and [W, H] != list(size):
+            issues.add(pid, "ERROR", "IMAGE_SIZE_MISMATCH", f"background.png is {list(size)}, background.json says {[W, H]}")
+        if meta and meta.get("image_size") and list(meta["image_size"]) != [W, H]:
+            issues.add(pid, "ERROR", "IMAGE_SIZE_MISMATCH", f"placement.json {meta['image_size']} vs background.json {[W, H]}")
+        labels = Counter(o.get("label") for o in scene.get("objects") or [])
+        if not labels["floor"]:
+            issues.add(pid, "ERROR", "NO_FLOOR", "segmentation found no floor polygon in the shared background")
+        if not labels["door"]:
+            issues.add(pid, "WARN", "NO_DOOR", "segmentation found no door polygon in the shared background")
+        scene_object_checks(scene, W, H, pid, issues)
+    return {"scene": scene, "size": size}
+
+
+def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozenset(), shared=None):
+    """shared: the run's placement ({'scene': dict}) when background.json is not per clip (see check_placement)."""
     clip_id = f"{source}/{clip_dir.name}"
     row = {"clip": clip_id, "source": source}
     found, sizes, n_files_ok = check_clip_files(clip_dir, clip_id, issues, optional)
@@ -773,8 +847,9 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
     if "features" not in found:
         return row, None, None, None, None
     feat = load_json(found["features"], clip_id, issues)
-    scene = load_json(found["scene"], clip_id, issues) if "scene" in found else None
-    if feat is None or ("scene" in found and scene is None):
+    own_scene = "scene" in found
+    scene = load_json(found["scene"], clip_id, issues) if own_scene else (shared or {}).get("scene")
+    if feat is None or (own_scene and scene is None):
         return row, None, None, None, None
     try:
         info, data = feat["info"], feat["data"]
@@ -803,10 +878,15 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
         row["label_matches_source"] = label == source
         if label != source:
             issues.add(clip_id, "INFO", "LABEL_DIFFERS_FROM_SOURCE", f"tracker label '{label}' in source '{source}'")
-    if info.get("clip") != re.sub(r"_\d+$", "", prefix):
+    # info.clip is the source video file name (with .mp4 in feat-0.4); the file prefix is its stem plus _N for the Nth person
+    clip_name = re.sub(r"\.(mp4|avi|mov|mkv)$", "", str(info.get("clip") or ""), flags=re.I)
+    if clip_name != re.sub(r"_\d+$", "", prefix):
         issues.add(clip_id, "WARN", "CLIP_NAME_MISMATCH", f"info.clip={info.get('clip')} vs file prefix {prefix}")
     sources = info.get("sources") or {}
-    for key, name in (("scene", prefix + "_background.json"), ("background", prefix + "_background.png")):
+    for key, role, own, shared_name in (("scene", "scene", prefix + "_background.json", PLACEMENT_FILES["scene"]),
+                                        ("background", "background_img", prefix + "_background.png", PLACEMENT_FILES["background_img"])):
+        # per-clip file next to the features in older runs, the shared placement/ file since one background per run
+        name = own if role in found or shared is None else shared_name
         if sources.get(key) != name:
             issues.add(clip_id, "WARN", "SOURCE_NAME_MISMATCH", f"info.sources.{key}={sources.get(key)} expected {name}")
     sha_f = info.get("clip_video_sha256")
@@ -815,7 +895,7 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
         issues.add(clip_id, "ERROR", "SHA_MISSING", "features.json has no clip_video_sha256")
     if scene is not None:
         sha_s = scene.get("source_video_sha256")
-        if sha_f != sha_s:
+        if own_scene and sha_f != sha_s:  # a shared background comes from one video, not from this clip
             issues.add(clip_id, "ERROR", "SHA_MISMATCH", f"features {str(sha_f)[:10]} vs background.json {str(sha_s)[:10]}")
         if [W, H] != scene.get("image_size"):
             issues.add(clip_id, "ERROR", "FRAME_SIZE_MISMATCH", f"features {[W, H]} vs background.json {scene.get('image_size')}")
@@ -832,22 +912,11 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
         objs = scene.get("objects") or []
         labels = Counter(o.get("label") for o in objs)
         row.update(n_floor_polys=labels["floor"], n_wall_polys=labels["wall"], n_door_polys=labels["door"])
-        if not labels["floor"]:
+        if own_scene and not labels["floor"]:
             issues.add(clip_id, "ERROR", "NO_FLOOR", "segmentation found no floor polygon")
-        if not labels["door"]:
+        if own_scene and not labels["door"]:
             issues.add(clip_id, "WARN", "NO_DOOR", "segmentation found no door polygon")
-        floor_area = 0.0
-        for o in objs:
-            poly = o.get("polygon") or []
-            if len(poly) < 3:
-                issues.add(clip_id, "WARN", "POLYGON_DEGENERATE", f"{o.get('label')} polygon with {len(poly)} points")
-                continue
-            if W and H and any(not (-2 <= x <= W + 2 and -2 <= y <= H + 2) for x, y in poly):
-                issues.add(clip_id, "WARN", "POLYGON_OUT_OF_FRAME", f"{o.get('label')} polygon leaves the frame")
-            if not 0 <= o.get("confidence", 0) <= 1:
-                issues.add(clip_id, "WARN", "CONFIDENCE_RANGE", f"{o.get('label')} confidence {o.get('confidence')}")
-            if o.get("label") == "floor":
-                floor_area += shoelace(poly)
+        floor_area = scene_object_checks(scene, W, H, clip_id if own_scene else None, issues)
         if W and H:
             row["floor_frac_polygons"] = round(floor_area / (W * H), 4)
             if abs(floor_area / (W * H) - ss["areas"]["floor_frac"]) > args.area_tol:
@@ -1073,16 +1142,27 @@ def validate_sources(args, sources, tracks_by_source, issues):
             for role, suffix in FILES.items():
                 present[role] += any(name.endswith(suffix) for name in names)
 
+        shared = check_placement(path, name, issues)
         optional = frozenset(role for role in FILES
                              if role != "features" and clip_dirs and present[role] == 0)
-        if optional:
+        not_delivered = optional - set(SHARED_ROLES) if shared else optional  # those live in placement/ now
+        if not_delivered:
             issues.add(name, "INFO", "FILES_NOT_DELIVERED",
-                       f"{sorted(optional)} are in none of the {len(clip_dirs)} clip folders "
+                       f"{sorted(not_delivered)} are in none of the {len(clip_dirs)} clip folders "
                        "(run without --debug?); checks that need them are skipped")
+
+        with_tiers = [d for d in clip_dirs if any(TIER_FILE.search(p.name) for p in d.iterdir())]
+        for clip_dir in with_tiers:
+            have = {t for t in TIERS if any(p.name.endswith(f"_features_{t}.json") for p in clip_dir.iterdir())}
+            if have != set(TIERS):
+                issues.add(f"{name}/{clip_dir.name}", "WARN", "TIER_FILE_MISSING", f"privacy tiers missing: {sorted(set(TIERS) - have)}")
+        if with_tiers:
+            for clip_dir in set(clip_dirs) - set(with_tiers):
+                issues.add(f"{name}/{clip_dir.name}", "WARN", "TIER_FILE_MISSING", "no privacy tier files, other clips of the source have them")
 
         for clip_dir in clip_dirs:
             row, null_stats, vec, _sha, unexplained = validate_clip(
-                clip_dir, name, args, issues, tracks_by_source[name], optional)
+                clip_dir, name, args, issues, tracks_by_source[name], optional, shared)
             rows.append(row)
             if null_stats is not None:
                 null_by_clip[row["clip"]] = null_stats
@@ -1151,7 +1231,11 @@ def check_dataset_consistency(rows, null_by_clip, issues):
 
     for field in ("fps", "session", "width", "height"):
         counts = Counter(row.get(field) for row in ok_rows)
-        if len(counts) > 1:
+        values = [v for v in counts if v is not None]
+        # the recorder measures its frame rate, so 12.0 and 13.0 are the same camera setting; a spread of
+        # more than FPS_SPREAD fps is a real difference (e.g. 7 and 14)
+        same_fps = field == "fps" and values and max(values) - min(values) <= FPS_SPREAD
+        if len(counts) > 1 and not same_fps:
             issues.add("DATASET", "INFO", f"MIXED_{field.upper()}", f"{dict(counts)}")
     return ok_rows
 
@@ -1287,6 +1371,10 @@ def check_pipeline_logs(args, sources, log_dirs, logs_by_source, rows, csv_stats
         if logs is not None:
             log_summaries[name] = check_logs(
                 name, logs, rows, csv_stats.get(name), issues, diff_rows)
+            run = log_summaries[name] and log_summaries[name]["run"]
+            if run and run.get("placement") and not (sources[name] / PLACEMENT_DIR).is_dir():
+                issues.add(name, "ERROR", "PLACEMENT_FOLDER_MISSING",
+                           f"{run['file']} used a shared background ({run['placement'][1]}) but {PLACEMENT_DIR}/ is not in the delivery")
         elif not args.no_logs:
             issues.add(name, "INFO", "NO_LOGS",
                        f"{log_dirs.get(name, sources[name] / 'logs')} not found: "
@@ -1555,6 +1643,8 @@ def main():
     sources = resolve_sources(args)
     expect = resolve_expectations(args, sources)
     args.out.mkdir(parents=True, exist_ok=True)
+    for stale in ("unexplained_nulls.csv", "log_vs_folders.csv"):  # only written when there is something to report
+        (args.out / stale).unlink(missing_ok=True)                  # so a file from an earlier run must not stay
     allow = [re.compile(p) for p in DOCUMENTED_NULLABLE + args.ignore_null]
 
     issues = Issues()
@@ -1600,7 +1690,7 @@ def main():
         log_summaries, null_rows, centers, outliers)
 
     print(f"Validation finished: {len(rows)} clips, {sev_count['ERROR']} error(s), {sev_count['WARN']} warning(s), {sev_count['INFO']} info.")
-    print(f"Overview with what to check: {args.out / 'summary.md'}")
+    print(f"Overview with what to check: {(args.out / 'summary.md').resolve()}")
     print("Details: issues.csv, clip_report.csv, feature_nulls.csv" + (", unexplained_nulls.csv" if unexplained_rows else "")
           + (", log_vs_folders.csv" if diff_rows else ""))
     sys.exit(1 if sev_count["ERROR"] else 0)
