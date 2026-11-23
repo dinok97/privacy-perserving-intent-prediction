@@ -69,10 +69,17 @@ SHOW_NULL_ABOVE = 0.30
 MIN_FRAMES_FOR_NULLS = 5
 BORDERLINE_THRESHOLD = 0.15
 MIN_DETECTED_FRAMES = 10
-MAX_GAP_FRAMES = 5
+MAX_GAP_FRAMES = 5      # only gaps longer than this are checked
+GAP_SPEED_TOL = 0.10    # wiggle room on the person's own speed when crossing a gap
+UNEXPLAINED_NULL_FRAC = 0.05  # flag a clip when more than this share of its detected frames has an unexplained null
+MIN_SPEED_BH_S = 0.1    # min_speed_bh_s in feature_extractor.py PARAMS: below this the heading is null
+LOOMING_MIN = 1e-3      # tau_s is null at or below this looming rate (feature_extractor.py)
+RULE_MARGIN = 0.005     # rounding margin when a value sits right at the limit of a rule
+GAP_SLACK_BH = 0.1      # plus this much distance (body heights) for ground-point noise
 MAX_JUMP_BH = 0.5
 MAX_OFF_FLOOR = 0.5
-REACH_BH = 0.5
+END_NEAR_TARGET_BH = 0.2  # a pass clip should not end closer to the target door than this (body heights)
+ENTER_FAR_TARGET_BH = 0.5  # an enter clip should not end farther from the target door than this (body heights)
 AREA_TOL = 0.03
 AREA_SUM_MAX = 1.15
 CLUSTER_TOL = 0.04
@@ -81,19 +88,65 @@ SEVERITY_RANK = {"ERROR": 0, "WARN": 1, "INFO": 2}
 
 # Nulls that FEATURES.md says are by design, or that are structural in the sample files
 # (edge is only set for edge-type exits). Matched against the normalised feature path.
+NULL_REASONS_COMPILED = []   # filled below, once NULL_REASONS exists
 DOCUMENTED_NULLABLE = [
     r"^kin\.heading_deg$",                  # null below 0.1 bh/s (FEATURES.md 4.3)
     r"^scene_rel\.competitors\[\]$",        # null-padded to n_competitors (4.5)
     r"\.edge$",                             # only edge exits have an edge (inferred from samples)
     r"n_concurrent_tracks",                 # reserved null (4.6)
+    r"^scene_rel\.exits\[\]\.ttr_s$",       # null unless the person approaches that exit (feature_extractor.py rel())
+]
+
+# Why a feature is null, from the extractor's own rules (feature_extractor.py). Shown in summary.md.
+NULL_REASONS = [
+    (r"^kin\.heading_deg$", "person moves slower than 0.1 bh/s (heading undefined when standing)"),
+    (r"^kin\.(turn_rate_deg_s|curvature_per_px)$", "no heading in this or the previous frame"),
+    (r"^kin\.accel_bh_s2$", "first frame of a run (no previous speed)"),
+    (r"^kin\.tau_s$", "box not growing (person not moving toward the camera)"),
+    (r"^pose\.torso_vs_motion_deg$", "no heading, or shoulders not visible"),
+    (r"align", "no heading (standing still)"),
+    (r"most_aligned|target_minus_best", "no heading (standing still)"),
+    (r"ttr_s$", "no heading, or not approaching that opening"),
+    (r"^pos\.inside_exit_idx$", "ground point is not inside any other exit polygon (the target door is not in this list)"),
+    (r"^scene_rel\.competitors\[\]$", "empty slot: fewer than 2 other exits, or no heading to rank them"),
+    (r"\.edge$", "only edge exits have an edge"),
+    (r"n_concurrent_tracks", "reserved, always null"),
 ]
 
 UNIT_INTERVAL = {"kp_conf_mean", "confidence", "brightness_mean", "brightness_contrast",
                  "detection_rate", "path_straightness"}
 NON_NEGATIVE = {"bbox_h_px", "body_height_px", "leg_length_bh", "shoulder_width_bh", "hip_width_bh",
                 "ankle_sep_bh", "wrist_spread_bh", "ttr_s", "tau_s", "bh_ref_px"}
-OUTLIER_STATS = ["n_frames", "detection_rate", "duration_s", "floor_frac", "wall_frac", "door_frac",
-                 "brightness_mean", "n_exits", "path_length_bh", "mean_speed_bh_s"]
+OUTLIER_STATS = ["n_frames", "duration_s", "detection_rate", "floor_frac", "brightness_mean"]
+
+NULL_REASONS_COMPILED = [(re.compile(pattern), text) for pattern, text in NULL_REASONS]
+
+# Outlier kinds: stat -> (code if far above the dataset, code if far below, what to check above, what to check below)
+# The code names the kind, so the issues-by-type table shows what the outliers are.
+OUTLIER_KINDS = {
+    "n_frames": (
+        "OUTLIER_MANY_FRAMES", "OUTLIER_FEW_FRAMES",
+        "Far more frames than a typical clip: someone lingering, or a track that stayed alive for minutes. Long clips weigh more in training; watch the clip.",
+        "Far fewer frames than a typical clip: little signal. Consider excluding it."),
+    "duration_s": (
+        "OUTLIER_LONG_VIDEO", "OUTLIER_SHORT_VIDEO",
+        "The person is in view far longer than usual: loitering, or a track that followed several people. Watch the clip.",
+        "The person is in view far shorter than usual: little signal. Consider excluding it."),
+    "detection_rate": (
+        "OUTLIER_HIGH_DETECTION", "OUTLIER_LOW_DETECTION",
+        "The person is detected in unusually many frames of the clip. Usually harmless; check it is not a very short track.",
+        "The person is detected in unusually few frames of the clip: often lost (occlusion, poor pose). Open the debug image."),
+    "floor_frac": (
+        "OUTLIER_LARGE_FLOOR", "OUTLIER_SMALL_FLOOR",
+        "The floor covers far more of the image than usual: a different location or camera height, or floor segmented onto walls. Open the overlay.",
+        "The floor covers far less of the image than usual: a different location or camera height; zero or near zero is a bad segmentation. Open the overlay."),
+    "brightness_mean": (
+        "OUTLIER_BRIGHT_SCENE", "OUTLIER_DARK_SCENE",
+        "The background is much brighter than the rest: a different lighting condition, which is what you want in the data.",
+        "The background is much darker than the rest: a different lighting condition, which is what you want in the data."),
+}
+# these are counts or rates, so the ratio to the median is easy to read
+RATIO_STATS = {"n_frames", "duration_s"}
 
 
 # What to look for, per issue code (shown in summary.md and issues.csv)
@@ -129,14 +182,14 @@ HINTS = {
     "TIMESTAMP": "t does not equal frame_index / fps. Check effective_fps and the frame list.",
     "TRACK_SUMMARY_MISMATCH": "The track summary counts disagree with the frame list. features.json is inconsistent.",
     "SHORT_TRACK": "Few detected frames: little signal. Consider excluding the clip from training.",
-    "DETECTION_GAPS": "The person is lost and found again inside the track (ID switch or occlusion). Watch the clip or look at the debug image.",
+    "DETECTION_GAPS": "After a gap the person is farther away than they could have walked at their own speed (ID switch or a different person). Look at the frames before and after the gap in the debug image.",
     "FRAME_BLOCK_MISSING": "A detected frame lacks pos/kin/pose/scene_rel. features.json is incomplete.",
     "VALUE_RANGE": "A value is outside its allowed range (message gives the field and frame). Open features.json at that frame.",
     "TELEPORT": "The ground point jumps in one frame: track switched to another person or a bad foot detection. Check the debug trajectory.",
     "OFF_FLOOR": "The person is mostly outside the floor mask: bad segmentation. Look at the overlay and debug image.",
-    "ENTER_NEVER_REACHES": "Labelled enter but never gets close to the target door. Check the debug image; the label is likely wrong.",
-    "PASS_REACHES_TARGET": "Labelled pass but gets very close to the target door. Check the debug image; the label may be wrong.",
-    "TRACKS_DUPLICATE_ROW": "The same clip_id is in several clips.csv files; the later one is used. Check which run is right.",
+    "PASS_ENDS_AT_TARGET": "Labelled pass but the person ends right at the target door (last detected frame). Check the debug image; the label may be wrong.",
+    "ENTER_NEVER_REACHES": "Labelled enter but the person ends away from the target door (last detected frame). Check the debug image; the label may be wrong.",
+    "TRACKS_DUPLICATE_ROW": "A clip_id must appear once in the tracks folder (one clips.csv, one row per clip_id). It appears twice, in one file or in several clips.csv files; the later row is used. Check that the tracker output was not mixed from several runs.",
     "TRACKS_NO_ROW": "No clips.csv row for this clip: the folder does not belong to the tracker output you have.",
     "CSV_NOT_KEEP": "clips.csv marks this clip as removed, yet features exist. Check the removal reason and the run.",
     "LABEL_CSV_MISMATCH": "clips.csv and features.json disagree on the label. Open both; one of them was changed or is from another run.",
@@ -199,8 +252,8 @@ HINTS = {
     "MIXED_HEIGHT": "Frames have different heights. Pixel features are not comparable without scaling.",
     "FEATURE_ALWAYS_NULL": "A feature that is never filled. Either by design (check FEATURES.md) or broken: do not use it, ask the supervisors.",
     "FEATURE_MOSTLY_NULL": "Null in most clips: a property of the feature, not of single clips. Decide whether it is usable.",
-    "UNUSUAL_NULLS": "Features that are normally filled are empty in this clip (listed in the message). Open the clip's debug image: usually no pose or poor detection.",
-    "OUTLIER": "A number far from the rest of the dataset. Open the clip and check whether it is real or a pipeline problem.",
+    "UNUSUAL_NULLS": "Features are null in more than half of this clip's frames. Often normal (person standing still, walking away): see the column 'why null' in the null table. It is a problem only when UNEXPLAINED_NULLS is also raised for the clip.",
+    "UNEXPLAINED_NULLS": "A feature is null although the extractor's own rule says it must be filled (for example heading null while the person moves at 0.1 bh/s or more). The message names the features and the first frame. Open features.json at that frame; this points to an extractor bug or a damaged file.",
 }
 
 
@@ -250,11 +303,95 @@ def shoelace(poly):
     return abs(area) / 2
 
 
+def gap_jumps(frames, fps, min_gap, tol, slack_bh):
+    """Every gap longer than min_gap undetected frames: how far the ground point moved across it
+    versus how far the person could walk at their own speed (v = s / t, with wiggle room)."""
+    det = [f for f in frames if f.get("detected")]
+    speeds = [f["kin"]["speed_bh_s"] for f in det
+              if isinstance((f.get("kin") or {}).get("speed_bh_s"), (int, float))]
+    typical = statistics.median(speeds) if speeds else 0.0     # a person who paused may resume at this pace
+    out = []
+    for a, b in zip(det, det[1:]):
+        missing = b["frame_index"] - a["frame_index"] - 1
+        pa, pb, bh = a["pos"].get("ground_px"), b["pos"].get("ground_px"), a["pos"].get("bh_ref_px")
+        if missing <= min_gap or not fps or not (pa and pb and bh):
+            continue
+        seconds = (b["frame_index"] - a["frame_index"]) / fps
+        last = (a.get("kin") or {}).get("speed_bh_s") or 0.0     # last known speed before the gap
+        out.append({"missing": missing, "seconds": seconds,
+                    "jump_bh": math.hypot(pb[0] - pa[0], pb[1] - pa[1]) / bh,
+                    "allowed_bh": max(last, typical) * seconds * (1 + tol) + slack_bh})
+    return out
+
+
+def unexplained_nulls(frames):
+    """Nulls that the extractor's own rules do not explain, read from the features JSON alone.
+    A feature is checked only in frames where a rule says it must be filled (for example the heading
+    when the person moves at 0.1 bh/s or more). Returns ({path: [frames checked, nulls, first frame]},
+    number of detected frames with at least one unexplained null)."""
+    stats = defaultdict(lambda: [0, 0, None])
+    bad_frames, prev = 0, None
+
+    def check(path, f, applicable, value):
+        if not applicable:
+            return False
+        entry = stats[path]
+        entry[0] += 1
+        if value is None:
+            entry[1] += 1
+            if entry[2] is None:
+                entry[2] = f.get("frame_index")
+            return True
+        return False
+
+    for f in frames:
+        if not f.get("detected"):
+            prev = None                     # the extractor forgets speed and heading across a gap
+            continue
+        kin, pose, rel = (f.get(block) or {} for block in ("kin", "pose", "scene_rel"))
+        pk = (prev or {}).get("kin") or {}
+        sp, hd, loom = kin.get("speed_bh_s"), kin.get("heading_deg"), kin.get("looming_rate_per_s")
+        has_heading = hd is not None
+        bad = False
+        bad |= check("kin.heading_deg", f, sp is not None and sp >= MIN_SPEED_BH_S + RULE_MARGIN, hd)
+        bad |= check("kin.accel_bh_s2", f, sp is not None and pk.get("speed_bh_s") is not None, kin.get("accel_bh_s2"))
+        two_headings = has_heading and pk.get("heading_deg") is not None
+        bad |= check("kin.turn_rate_deg_s", f, two_headings, kin.get("turn_rate_deg_s"))
+        bad |= check("kin.curvature_per_px", f, two_headings, kin.get("curvature_per_px"))
+        bad |= check("kin.tau_s", f, loom is not None and loom > 2 * LOOMING_MIN, kin.get("tau_s"))
+        bad |= check("pose.torso_vs_motion_deg", f, has_heading and pose.get("shoulder_angle_deg") is not None,
+                     pose.get("torso_vs_motion_deg"))
+        target = rel.get("target") or {}
+        comps = rel.get("competitors") or []
+        exits = rel.get("exits") or []
+        bad |= check("scene_rel.target.align_deg", f, has_heading, target.get("align_deg"))
+        bad |= check("scene_rel.target.align_center_deg", f, has_heading, target.get("align_center_deg"))
+        for key in ("align_deg", "align_center_deg"):
+            filled = None if any(e.get(key) is None for e in exits) else 0
+            bad |= check(f"scene_rel.exits[].{key}", f, has_heading and bool(exits), filled)
+        bad |= check("scene_rel.most_aligned", f, has_heading, rel.get("most_aligned"))
+        bad |= check("scene_rel.target_minus_best_competitor_align_deg", f,
+                     has_heading and bool(comps) and comps[0] is not None,
+                     rel.get("target_minus_best_competitor_align_deg"))
+        bad_frames += bad
+        prev = f
+    return dict(stats), bad_frames
+
+
 def robust_z(values):
     """Median and median absolute deviation of a list of numbers."""
     med = statistics.median(values)
     mad = statistics.median(abs(v - med) for v in values)
     return med, mad
+
+
+for _high, _low, _high_text, _low_text in OUTLIER_KINDS.values():
+    HINTS[_high], HINTS[_low] = _high_text, _low_text
+
+
+def md_cell(text):
+    """Make text safe inside a markdown table cell."""
+    return str(text).replace("|", "\\|").replace("\n", " ")
 
 
 def hint(code):
@@ -454,8 +591,11 @@ def load_tracks(tracks_dir, source, issues):
                 r["_dir"] = csv_path.parent
                 old = rows.get(r["clip_id"])
                 if old:
+                    where = (f"twice in {csv_path}" if old["_csv"] == csv_path
+                             else f"in {old['_csv']} and {csv_path}")
                     issues.add(f"{source}/{r['clip_id']}", "WARN", "TRACKS_DUPLICATE_ROW",
-                               f"in clips.csv of {old['_dir'].name} and {csv_path.parent.name}; the later one is used")
+                               f"clip_id appears {where}; the later row is used")
+                r["_csv"] = csv_path
                 rows[r["clip_id"]] = r
     return rows
 
@@ -631,29 +771,29 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
     found, sizes, n_files_ok = check_clip_files(clip_dir, clip_id, issues, optional)
     row["n_files_ok"] = n_files_ok
     if "features" not in found:
-        return row, None, None, None
+        return row, None, None, None, None
     feat = load_json(found["features"], clip_id, issues)
     scene = load_json(found["scene"], clip_id, issues) if "scene" in found else None
     if feat is None or ("scene" in found and scene is None):
-        return row, None, None, None
+        return row, None, None, None, None
     try:
         info, data = feat["info"], feat["data"]
         frames, ss, ts = data["frames"], data["scene_summary"], data["track_summary"]
     except KeyError as e:
         issues.add(clip_id, "ERROR", "SCHEMA_KEYS", f"features.json lacks key {e}")
-        return row, None, None, None
+        return row, None, None, None, None
 
     prefix = found["features"].name[: -len(FILES["features"])]
     meta = info.get("trajectory_meta") or {}
     W, H = (info.get("frame_size") or [None, None])[:2]
     fps = meta.get("effective_fps")
+    if info.get("schema_version") != SCHEMA_VERSION:
+        issues.add(clip_id, "ERROR", "SCHEMA_VERSION", f"{info.get('schema_version')} != {SCHEMA_VERSION}")
     row.update(label=info.get("label"), schema=info.get("schema_version"), fps=fps, record_fps=meta.get("record_fps"),
                session=meta.get("session_id"), git_commit=meta.get("git_commit"),
                width=W, height=H)
 
     # --- provenance / identity
-    if info.get("schema_version") != SCHEMA_VERSION:
-        issues.add(clip_id, "ERROR", "SCHEMA_VERSION", f"{info.get('schema_version')} != {SCHEMA_VERSION}")
     label = info.get("label")
     if label not in LABELS:
         issues.add(clip_id, "ERROR", "LABEL_INVALID", f"info.label={label}")
@@ -764,8 +904,14 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
     last = len(mask) - 1 - mask[::-1].index(True) if True in mask else -1
     gaps = sum(1 for i in range(first, last + 1) if not mask[i])
     row.update(lead_undetected=first, trail_undetected=len(mask) - 1 - last, gap_frames=gaps)
-    if gaps > args.max_gap_frames:
-        issues.add(clip_id, "WARN", "DETECTION_GAPS", f"{gaps} undetected frames inside the track (fragmented)")
+    checked = gap_jumps(frames, fps, args.max_gap_frames, args.gap_speed_tol, args.gap_slack_bh)
+    too_far = [g for g in checked if g["jump_bh"] > g["allowed_bh"]]
+    row.update(n_checked_gaps=len(checked), n_implausible_gaps=len(too_far))
+    if too_far:
+        w = max(too_far, key=lambda g: g["jump_bh"] / max(g["allowed_bh"], 1e-6))
+        issues.add(clip_id, "WARN", "DETECTION_GAPS",
+                   f"{len(too_far)} gap(s) too far to be the same person; worst: {w['missing']} frames ({w['seconds']:.1f} s), "
+                   f"moved {w['jump_bh']:.2f} bh, at most {w['allowed_bh']:.2f} bh at their own speed")
 
     nulls, totals, bad_numbers = Counter(), Counter(), {}
     for f in det:
@@ -818,19 +964,28 @@ def validate_clip(clip_dir, source, args, issues, tracks=None, optional=frozense
     if row["off_floor_rate"] > args.max_off_floor:
         issues.add(clip_id, "WARN", "OFF_FLOOR", f"{row['off_floor_rate']:.0%} of frames have the person off the floor mask")
 
-    # label vs behaviour: does the person reach the target door?
+    # label vs end position: a pass clip should not end at the target door, an enter clip should
     dists = [f["scene_rel"]["target"]["dist_bh"] for f in det
              if isinstance((f["scene_rel"].get("target") or {}).get("dist_bh"), (int, float))]
-    row["min_target_dist_bh"] = round(min(dists), 3) if dists else None
-    if dists:
-        if label == "enter" and min(dists) > args.reach_bh:
-            issues.add(clip_id, "WARN", "ENTER_NEVER_REACHES", f"closest approach to target {min(dists):.2f} bh")
-        if label == "pass" and min(dists) <= args.reach_bh / 2.5:
-            issues.add(clip_id, "WARN", "PASS_REACHES_TARGET", f"closest approach to target {min(dists):.2f} bh")
+    end_dist = dists[-1] if dists else None   # distance in the last detected frame
+    row["end_target_dist_bh"] = round(end_dist, 3) if end_dist is not None else None
+    if label == "pass" and end_dist is not None and end_dist <= args.end_near_target_bh:
+        issues.add(clip_id, "WARN", "PASS_ENDS_AT_TARGET", f"ends {end_dist:.2f} bh from the target door")
+    if label == "enter" and end_dist is not None and end_dist > args.enter_far_target_bh:
+        issues.add(clip_id, "WARN", "ENTER_NEVER_REACHES", f"ends {end_dist:.2f} bh from the target door")
 
     vec = (ss["areas"]["floor_frac"], ss["areas"]["door_frac"], (ss.get("floor_top_y_px") or 0) / (H or 480))
     null_stats = {p: (nulls[p], totals[p]) for p in totals}
-    return row, null_stats, vec, sha_f
+    unexplained, bad_frames = unexplained_nulls(frames)
+    row["unexplained_null_frames"] = bad_frames
+    if det and bad_frames >= 2 and bad_frames / len(det) > args.unexplained_null_frac:
+        worst = sorted(((entry[1], path) for path, entry in unexplained.items() if entry[1]), reverse=True)
+        text = "; ".join(f"{path} {n} of {unexplained[path][0]}" for n, path in worst[:6])
+        first = min(unexplained[path][2] for _, path in worst)
+        issues.add(clip_id, "WARN", "UNEXPLAINED_NULLS",
+                   f"{bad_frames} of {len(det)} detected frames have a null the extractor's rules do not explain "
+                   f"({text}); first at frame {first}")
+    return row, null_stats, vec, sha_f, unexplained
 
 
 # ----------------------------------------------------------------------------- dataset
@@ -905,7 +1060,7 @@ def load_logs(args, sources):
 
 def validate_sources(args, sources, tracks_by_source, issues):
     """Validate every clip folder and collect report, null, and scene data."""
-    rows, null_by_clip, vecs = [], {}, {}
+    rows, null_by_clip, vecs, unexplained_by_clip = [], {}, {}, {}
     for name, path in sources.items():
         clip_dirs = [p for p in sorted(path.iterdir())
                      if p.is_dir() and p.name not in SKIP_DIRS and not p.name.startswith("[TEMP]")]
@@ -926,16 +1081,17 @@ def validate_sources(args, sources, tracks_by_source, issues):
                        "(run without --debug?); checks that need them are skipped")
 
         for clip_dir in clip_dirs:
-            row, null_stats, vec, _sha = validate_clip(
+            row, null_stats, vec, _sha, unexplained = validate_clip(
                 clip_dir, name, args, issues, tracks_by_source[name], optional)
             rows.append(row)
             if null_stats is not None:
                 null_by_clip[row["clip"]] = null_stats
+                unexplained_by_clip[row["clip"]] = unexplained
                 vecs[row["clip"]] = vec
 
     if not rows:
         sys.exit("No clip folders found (expected ROOT/enter/<clip>/ and ROOT/pass/<clip>/).")
-    return rows, null_by_clip, vecs
+    return rows, null_by_clip, vecs, unexplained_by_clip
 
 
 def check_tracker_folders(tracks_by_source, logs_by_source, rows, issues, expect):
@@ -1000,7 +1156,7 @@ def check_dataset_consistency(rows, null_by_clip, issues):
     return ok_rows
 
 
-def check_feature_nulls(args, rows, null_by_clip, issues, allow):
+def check_feature_nulls(args, rows, null_by_clip, issues, allow, unexplained_by_clip=None):
     """Summarize feature null rates and flag clips with unusual null patterns."""
     per_path = defaultdict(list)
     label_of = {row["clip"]: row.get("label") for row in rows}
@@ -1031,6 +1187,12 @@ def check_feature_nulls(args, rows, null_by_clip, issues, allow):
         status = ("ALWAYS_NULL" if total_null == total_frames
                   else "MOSTLY_NULL" if structural
                   else "SOMETIMES_HIGH" if high else "ok")
+        checked = nulls_unexplained = 0
+        for clip_stats in (unexplained_by_clip or {}).values():
+            if path in clip_stats:
+                checked += clip_stats[path][0]
+                nulls_unexplained += clip_stats[path][1]
+        reason = next((text for pattern, text in NULL_REASONS_COMPILED if pattern.search(path)), "")
         null_rows.append({
             "feature": path,
             "pooled_null_rate": round(total_null / total_frames, 3),
@@ -1042,6 +1204,10 @@ def check_feature_nulls(args, rows, null_by_clip, issues, allow):
             "clips_over_threshold": len(high),
             "documented_nullable": documented,
             "status": status,
+            "why_null": reason,
+            "rule_checked_frames": checked or None,
+            "unexplained_null_frames": nulls_unexplained if checked else None,
+            "unexplained_null_rate": round(nulls_unexplained / checked, 4) if checked else None,
         })
 
         if status == "ALWAYS_NULL" and not documented:
@@ -1088,9 +1254,11 @@ def assign_scene_clusters(args, rows, vecs):
 
 
 def check_outliers(ok_rows, issues):
-    """Add robust-z context for unusually large or small dataset values."""
+    """Add robust-z context for unusually large or small dataset values.
+    Returns one record per outlier (kind code, stat, clip, value, dataset median, z) for the summary."""
+    found = []
     if len(ok_rows) < 20:
-        return
+        return found
     for stat in OUTLIER_STATS:
         values = [(row["clip"], row[stat]) for row in ok_rows
                   if isinstance(row.get(stat), (int, float))]
@@ -1102,8 +1270,14 @@ def check_outliers(ok_rows, issues):
         for clip, value in values:
             z_score = 0.6745 * (value - median) / mad
             if abs(z_score) > 5:
-                issues.add(clip, "INFO", "OUTLIER",
-                           f"{stat}={value} (dataset median {median:.3g}, robust z={z_score:.1f})")
+                high, low = OUTLIER_KINDS[stat][:2]
+                ratio = f", {value / median:.1f}x the median" if stat in RATIO_STATS and median > 0 else ""
+                kind = high if z_score > 0 else low
+                issues.add(clip, "INFO", kind,
+                           f"{stat}={value} (dataset median {median:.3g}{ratio}, robust z={z_score:.1f})")
+                found.append({"kind": kind, "stat": stat, "above": z_score > 0, "clip": clip,
+                              "value": value, "median": median, "z": z_score})
+    return found
 
 
 def check_pipeline_logs(args, sources, log_dirs, logs_by_source, rows, csv_stats, issues):
@@ -1158,7 +1332,8 @@ def write_markdown_summary(args,
                            csv_stats,
                            log_summaries, 
                            null_rows, 
-                           centers):
+                           centers,
+                           outliers=()):
     """Build and write summary.md from the completed validation results."""
     severity_counts = Counter(issue["severity"] for issue in issues)
 
@@ -1220,14 +1395,40 @@ def write_markdown_summary(args,
               for (severity, code), count in sorted(
                   codes.items(), key=lambda item: (SEVERITY_RANK[item[0][0]], -item[1]))]
 
+    if outliers:
+        by_kind = defaultdict(list)
+        for o in outliers:
+            by_kind[o["kind"]].append(o)
+        lines += ["\n## 4. Outliers by kind (INFO: far from the dataset median, not necessarily wrong)\n",
+                  "| kind | stat | direction | clips | dataset median | most extreme clip | value | robust z |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for kind, items in sorted(by_kind.items(), key=lambda kv: -len(kv[1])):
+            worst = max(items, key=lambda o: abs(o["z"]))
+            lines.append(f"| {kind} | {worst['stat']} | {'above' if worst['above'] else 'below'} | {len(items)} | "
+                         f"{worst['median']:.3g} | `{worst['clip']}` | {worst['value']} | {worst['z']:.1f} |")
+        lines.append("\nEvery outlier row with its clip is in `issues.csv` (code starts with `OUTLIER_`).")
+
+    unusual = [r for r in null_rows if r["clips_over_threshold"] and r["status"] == "SOMETIMES_HIGH"
+               and not r["documented_nullable"]]
+    if unusual:
+        lines += [f"\n## 5. Unusual nulls by feature (WARN UNUSUAL_NULLS: feature null in more than {args.null_threshold:.0%} of a clip's frames)\n",
+                  "Most of these are normal for conditional features. Read 'why null' first; only `UNEXPLAINED_NULLS` points to a problem.\n",
+                  "| feature | clips flagged | of clips | why null (extractor rule) | unexplained |",
+                  "|---|---|---|---|---|"]
+        for r in sorted(unusual, key=lambda item: -item["clips_over_threshold"])[:30]:
+            lines.append(f"| {r['feature']} | {r['clips_over_threshold']} | {r['clips']} | {md_cell(r['why_null']) or '-'} | "
+                         f"{'-' if r['unexplained_null_rate'] is None else format(r['unexplained_null_rate'], '.3f')} |")
+        if len(unusual) > 30:
+            lines.append(f"\n{len(unusual) - 30} more features in `feature_nulls.csv`.")
+
     cross = Counter((row["source"], row.get("label")) for row in ok_rows)
-    lines += ["\n## 4. Source folder vs tracker label (clips)\n",
+    lines += ["\n## 6. Source folder vs tracker label (clips)\n",
               "| source | enter | pass | exit |", "|---|---|---|---|"]
     lines += [f"| {name} | {cross[(name, 'enter')]} | {cross[(name, 'pass')]} | {cross[(name, 'exit')]} |"
               for name in sources]
 
     if csv_stats:
-        lines += ["\n## 5. clips.csv (tracker) vs folders\n",
+        lines += ["\n## 7. clips.csv (tracker) vs folders\n",
                   "| source | keep | removed | folders found | manual_label set | enter | pass | exit | removal reasons |",
                   "|---|---|---|---|---|---|---|---|---|"]
         for name, stats in csv_stats.items():
@@ -1240,7 +1441,7 @@ def write_markdown_summary(args,
 
     shown = {name: value for name, value in log_summaries.items() if value}
     if shown:
-        lines += ["\n## 6. Pipeline logs (the run behind the data)\n"]
+        lines += ["\n## 8. Pipeline logs (the run behind the data)\n"]
         for name, summary in shown.items():
             run = summary["run"]
             stages = ", ".join(
@@ -1256,19 +1457,20 @@ def write_markdown_summary(args,
             ]
 
     lines += [
-        f"\n## 7. Feature null rates (features with a pooled null fraction above {args.show_null_above}; all features in `feature_nulls.csv`)\n",
-        "| feature | pooled null | enter | pass | exit | clips over threshold | status |",
-        "|---|---|---|---|---|---|---|",
+        f"\n## 9. Feature null rates (features with a pooled null fraction above {args.show_null_above}; all features in `feature_nulls.csv`)\n",
+        "| feature | pooled null | enter | pass | exit | clips over threshold | status | why null (extractor rule) | unexplained |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     null_table_rows = [
         f"| {row['feature']} | {frac(row['pooled_null_rate'])} | {frac(row['null_rate_enter'])} | "
         f"{frac(row['null_rate_pass'])} | {frac(row['null_rate_exit'])} | "
         f"{row['clips_over_threshold']}/{row['clips']} | {row['status']}"
-        f"{' (documented)' if row['documented_nullable'] else ''} |"
+        f"{' (documented)' if row['documented_nullable'] else ''} | {md_cell(row['why_null']) or '-'} | "
+        f"{frac(row['unexplained_null_rate'])} |"
         for row in sorted(null_rows, key=lambda item: -item["pooled_null_rate"])
-        if row["pooled_null_rate"] > args.show_null_above
+        if row["pooled_null_rate"] > args.show_null_above and not row["feature"].endswith("competitors[]")
     ][:40]
-    lines += null_table_rows or ["| none | | | | | | |"]
+    lines += null_table_rows or ["| none | | | | | | | | |"]
 
     lines += ["",
               "How to read it:",
@@ -1277,12 +1479,18 @@ def write_markdown_summary(args,
               "not the source folder. `-` means no clip of that label had data for the feature.",
               f"- **clips over threshold**: in how many clips the feature is null in more than {args.null_threshold} of that clip's frames (the per-clip warning level, `--null-threshold`).",
               "- **status**: `ALWAYS_NULL` never filled; `MOSTLY_NULL` null in most clips (a property of the feature); "
-              "`SOMETIMES_HIGH` normally filled but empty in some clips (those clips get an `UNUSUAL_NULLS` issue). "
-              "`documented` means FEATURES.md or the sample files show that nulls are by design.",
+              "`SOMETIMES_HIGH` normally filled but empty in some clips (normal for conditional features, see 'why null'; those clips get an `UNUSUAL_NULLS` warning, listed in section 5). "
+              "`documented` means FEATURES.md or the extractor code show that nulls are by design.",
+              "- `scene_rel.competitors[]` is not listed: that bare entry only counts empty slots (fewer than 2 other exits, or no heading to rank them), "
+              "so its null rate is 1.0 by construction. Filled slots appear as `scene_rel.competitors[].<field>`.",
+              "- **why null**: the extractor rule that makes the feature null (read from `feature_extractor.py`).",
+              "- **unexplained**: of the frames where that rule says the feature must be filled, the share where it is null anyway. "
+              "It should be 0.000. `-` means the rule cannot be checked from the JSON alone. "
+              "Clips with unexplained nulls get an `UNEXPLAINED_NULLS` issue and are listed in `unexplained_nulls.csv`.",
               "- Large differences between enter and pass can be real behaviour (e.g. time-to-target only exists when approaching), "
               "not an error."]
 
-    lines += ["\n## 8. Scene fingerprint groups (proxy for distinct locations / camera setups)\n",
+    lines += ["\n## 10. Scene fingerprint groups (proxy for distinct locations / camera setups)\n",
               "| group | clips | enter | pass | fps values | sessions |", "|---|---|---|---|---|---|"]
     for group in range(len(centers)):
         members = [row for row in rows if row.get("scene_cluster") == group]
@@ -1324,11 +1532,17 @@ def parse_args():
     ap.add_argument("--borderline", type=float, default=BORDERLINE_THRESHOLD,
                     help="flag enter/pass clips whose last point is within this distance of the ellipse boundary (value 1)")
     ap.add_argument("--min-detected", type=int, default=MIN_DETECTED_FRAMES)
-    ap.add_argument("--max-gap-frames", type=int, default=MAX_GAP_FRAMES)
+    ap.add_argument("--max-gap-frames", type=int, default=MAX_GAP_FRAMES, help="only gaps longer than this many undetected frames are checked")
+    ap.add_argument("--gap-speed-tol", type=float, default=GAP_SPEED_TOL, help="wiggle room on the person's own speed when crossing a gap (0.10 = 10%%)")
+    ap.add_argument("--unexplained-null-frac", type=float, default=UNEXPLAINED_NULL_FRAC,
+                    help="flag a clip when more than this share of its detected frames has a null the extractor's rules do not explain")
+    ap.add_argument("--gap-slack-bh", type=float, default=GAP_SLACK_BH, help="extra allowed distance across a gap, in body heights (ground-point noise)")
     ap.add_argument("--max-jump-bh", type=float, default=MAX_JUMP_BH, help="max ground-point move per frame, in body heights")
     ap.add_argument("--max-off-floor", type=float, default=MAX_OFF_FLOOR)
-    ap.add_argument("--reach-bh", type=float, default=REACH_BH,
-                    help="enter clips should come within this target distance (body heights); pass clips not within 0.4x of it")
+    ap.add_argument("--end-near-target-bh", type=float, default=END_NEAR_TARGET_BH,
+                    help="flag a pass clip whose last detected frame is within this distance of the target door (body heights)")
+    ap.add_argument("--enter-far-target-bh", type=float, default=ENTER_FAR_TARGET_BH,
+                    help="flag an enter clip whose last detected frame is farther than this from the target door (body heights)")
     ap.add_argument("--area-tol", type=float, default=AREA_TOL)
     ap.add_argument("--area-sum-max", type=float, default=AREA_SUM_MAX)
     ap.add_argument("--cluster-tol", type=float, default=CLUSTER_TOL, help="scene fingerprint distance (floor/door share, floor top) for the same-location grouping")
@@ -1346,7 +1560,7 @@ def main():
     issues = Issues()
     tracks_by_source = load_tracks_by_source(args, sources, issues)
     logs_by_source, log_dirs = load_logs(args, sources)
-    rows, null_by_clip, vecs = validate_sources(args, sources, tracks_by_source, issues)
+    rows, null_by_clip, vecs, unexplained_by_clip = validate_sources(args, sources, tracks_by_source, issues)
 
     csv_stats = check_tracker_folders(tracks_by_source, logs_by_source, rows, issues, expect)
 
@@ -1357,17 +1571,23 @@ def main():
 
     ok_rows = check_dataset_consistency(rows, null_by_clip, issues)
 
-    null_rows = check_feature_nulls(args, rows, null_by_clip, issues, allow)
+    null_rows = check_feature_nulls(args, rows, null_by_clip, issues, allow, unexplained_by_clip)
 
     centers = assign_scene_clusters(args, rows, vecs)
 
-    check_outliers(ok_rows, issues)
+    outliers = check_outliers(ok_rows, issues)
 
     # --- write
     prepare_issue_details(sources, rows, issues)
 
     write_csv_file(args.out, "clip_report.csv", rows)
     write_csv_file(args.out, "issues.csv", issues)
+    unexplained_rows = [{"clip": clip, "feature": path, "unexplained_frames": entry[1],
+                         "frames_where_rule_requires_a_value": entry[0], "first_frame": entry[2]}
+                        for clip, stats in unexplained_by_clip.items()
+                        for path, entry in stats.items() if entry[1]]
+    if unexplained_rows:
+        write_csv_file(args.out, "unexplained_nulls.csv", unexplained_rows)
     if diff_rows:
         write_csv_file(args.out, "log_vs_folders.csv", diff_rows)
     write_csv_file(
@@ -1377,11 +1597,12 @@ def main():
 
     sev_count, summary_path = write_markdown_summary(
         args, sources, rows, ok_rows, issues, csv_stats,
-        log_summaries, null_rows, centers)
+        log_summaries, null_rows, centers, outliers)
 
     print(f"Validation finished: {len(rows)} clips, {sev_count['ERROR']} error(s), {sev_count['WARN']} warning(s), {sev_count['INFO']} info.")
     print(f"Overview with what to check: {args.out / 'summary.md'}")
-    print("Details: issues.csv, clip_report.csv, feature_nulls.csv" + (", log_vs_folders.csv" if diff_rows else ""))
+    print("Details: issues.csv, clip_report.csv, feature_nulls.csv" + (", unexplained_nulls.csv" if unexplained_rows else "")
+          + (", log_vs_folders.csv" if diff_rows else ""))
     sys.exit(1 if sev_count["ERROR"] else 0)
 
 if __name__ == "__main__":
