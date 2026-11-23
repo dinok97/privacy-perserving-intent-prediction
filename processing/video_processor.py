@@ -22,8 +22,8 @@ Tracks that look unusable (too short, too few points, a partial person at the
 bottom edge) are not deleted, only marked cleaning_result="removed"; they stay
 out of the processed manifest that pipeline.py reads.
 
-Output is written under ../data:
-  data/2026-05-29/
+Output is written under ../data (one flat folder, no per-date subfolder):
+  data/
     <name>.json  <name>_pose.json      one pair per tracked person
     clips.csv                          one row per person: label, cleaning result, files
     session_<date>_<time>.json         one metadata file per run
@@ -410,8 +410,10 @@ class LivePoseCollector:
         self.sess_str = session_stamp(self.session_start)
         self.session_id = f"{self.date_str}_{self.sess_str}"
 
-        self.date_dir = Path(cfg.output_root) / self.date_str
-        self.date_dir.mkdir(parents=True, exist_ok=True)
+        # One flat output folder (no per-date subfolder), so there is exactly one
+        # clips.csv. A new run replaces the rows and files of the clips it produces.
+        self.out_dir = Path(cfg.output_root)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
 
         # Software versions / commit, recorded in the metadata.
         self.versions = {
@@ -442,7 +444,7 @@ class LivePoseCollector:
         self.counts = {"enter": 0, "pass": 0, "exit": 0, "removed": 0}
         self.reason_counts: dict[str, int] = {}
 
-        print(f"[INIT] output: {self.date_dir}  session: {self.sess_str}  "
+        print(f"[INIT] output: {self.out_dir}  session: {self.sess_str}  "
               f"sidecar: {'on' if cfg.write_pose_sidecar else 'off'}")
 
     # -- per-track lifecycle -------------------------------------------------
@@ -515,7 +517,7 @@ class LivePoseCollector:
             track_id=rec["track_id"], label=label, result=result, reason=reason,
             fps=self.fps, width=self.width, height=self.height,
             door=self.door, axes=self.axes, frames=frames, meta=meta)
-        trajectory_path = self.date_dir / f"{base}.json"
+        trajectory_path = self.out_dir / f"{base}.json"
         with trajectory_path.open("w", encoding="utf-8") as f:
             json.dump(sample, f, indent=2)
 
@@ -525,7 +527,7 @@ class LivePoseCollector:
             sidecar = build_pose_sidecar(
                 frames=frames, source_name=source.name, label=label,
                 fps=self.fps, width=self.width, height=self.height)
-            pose_path = self.date_dir / f"{base}_pose.json"
+            pose_path = self.out_dir / f"{base}_pose.json"
             with pose_path.open("w", encoding="utf-8") as f:
                 json.dump(sidecar, f)
 
@@ -734,8 +736,8 @@ class LivePoseCollector:
         self._write_session_metadata()
         self._write_processed_manifest()
         if self.clip_rows:
-            update_clips_csv(self.date_dir / "clips.csv", self.clip_rows)
-            print(f"[DONE] clip index: {self.date_dir / 'clips.csv'}")
+            update_clips_csv(self.out_dir / "clips.csv", self.clip_rows)
+            print(f"[DONE] clip index: {self.out_dir / 'clips.csv'}")
         print(f"[DONE] session {self.sess_str}: {self.counts}  reasons={self.reason_counts}")
 
     def _write_session_metadata(self):
@@ -752,7 +754,7 @@ class LivePoseCollector:
             "counts": self.counts,
             "reason_counts": self.reason_counts,
         }
-        path = self.date_dir / f"session_{self.session_id}.json"
+        path = self.out_dir / f"session_{self.session_id}.json"
         with path.open("w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         print(f"[DONE] session metadata: {path}")
