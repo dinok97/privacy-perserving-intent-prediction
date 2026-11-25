@@ -76,7 +76,7 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.m4v'}
 NOISY_LIBRARIES = ('PIL', 'matplotlib', 'urllib3', 'ultralytics', 'h5py', 'numba',
                    'httpx', 'httpcore', 'huggingface_hub', 'transformers', 'filelock')
 MIN_VALID_3D_RATIO = .5  # below this share of valid 3D frames a warning is logged
-CAPTURE_OUTPUT = True     # send print()/progress bars of submodules to the log file only
+CAPTURE_OUTPUT = True     # True: print()/progress bars of submodules go to the log file only; False (--show-output): also echoed to the console
 
 logger = logging.getLogger('pipeline')
 CONSOLE = None  # the ConsoleHandler, set by setup_logging
@@ -85,12 +85,16 @@ CONSOLE = None  # the ConsoleHandler, set by setup_logging
 # ----------------------------------------------------------------------------- logging helpers
 
 class StreamToLogger:
-    """File-like object: print() and progress-bar output go to a logger at DEBUG (log file only)."""
+    """File-like object: print() and progress-bar output go to a logger at DEBUG (the log file).
+    With echo=True the text is also passed on to the original stream (--show-output), so the
+    log file has the same content whether or not the console shows it."""
 
-    def __init__(self, name, original):
-        self.log, self.original, self.buffer = logging.getLogger(name), original, ''
+    def __init__(self, name, original, echo=False):
+        self.log, self.original, self.echo, self.buffer = logging.getLogger(name), original, echo, ''
 
     def write(self, text):
+        if self.echo:
+            self.original.write(text)
         self.buffer += text
         *lines, self.buffer = self.buffer.split('\n')
         for line in lines:
@@ -104,7 +108,8 @@ class StreamToLogger:
             self.log.debug(parts[-1])
 
     def flush(self):
-        pass
+        if self.echo:
+            self.original.flush()
 
     def close_buffer(self):
         if self.buffer:
@@ -112,7 +117,7 @@ class StreamToLogger:
             self.buffer = ''
 
     def isatty(self):
-        return False
+        return self.original.isatty() if self.echo else False
 
     def fileno(self):
         return self.original.fileno()
@@ -227,13 +232,11 @@ def stage(name, total=None):
     if CONSOLE is not None:
         CONSOLE.progress = progress
     progress.render()
-    out = StreamToLogger('pipeline.stdout', sys.stdout)
-    err = StreamToLogger('pipeline.stderr', sys.stderr)
+    echo = not CAPTURE_OUTPUT  # --show-output: the console sees the raw output too, the log file always does
+    out = StreamToLogger('pipeline.stdout', sys.stdout, echo)
+    err = StreamToLogger('pipeline.stderr', sys.stderr, echo)
     try:
-        if CAPTURE_OUTPUT:
-            with redirect_stdout(out), redirect_stderr(err):
-                yield progress
-        else:
+        with redirect_stdout(out), redirect_stderr(err):
             yield progress
     except Exception:
         _stop_progress()
